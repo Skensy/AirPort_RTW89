@@ -47,8 +47,14 @@ RTW88 bundle in place of the existing RTW88 bundle. The RTL8822CE Wi-Fi baseline
 binary from the [Realtek AirPort Family 1.0.1 release](https://github.com/xnoah222/Realtek-AirPort-Family/releases/tag/1.0.1).
 Its bundle version is 2.0.1 and the executable SHA-256 is
 `a2723f2531695511f5404a10ee4c586e06504da9561827671a26c2df9756eeb7`.
-The experimental 1.0.2d2 target uses an earlier frontend. To inspect AWDL
-on the experimental build, open AirDrop on both devices and run these commands
+The [upstream 2.0.1 source archive](https://github.com/xnoah222/Realtek-AirPort-Family/blob/6475f144f9620d1679a788f0f49052d8f06b944a/AirPort_RTW88-Source.zip)
+has SHA-256 `3d696ccc8066603044d280b01e1784bcc91fad1f1c8d2b2156f3df07308a47ba`.
+A local `make airport` in its `Feixiao` directory builds a different executable
+with additional BPF imports. Its driver-version response still says 2.0.0.
+Use the release executable or a verified EFI backup for exact rollback.
+
+The experimental 1.0.2d2 target in this repository uses an earlier frontend.
+To inspect AWDL on that build, open AirDrop on both devices and run these commands
 from Terminal:
 
 ```sh
