@@ -43,13 +43,12 @@ periodic sync transmissions during physical scans. Channel hopping while
 associated is currently unsupported.
 
 Use a bootable USB copy of your EFI for this experiment. Load the source-built
-RTW88 bundle in place of the existing RTW88 bundle. On Tahoe 26.7.x, the
-BroadTek Bluetooth companion can be tested alongside RealtekBluetoothFirmware
-and BlueToolFixup. For the internal Bluetooth radio with USB ID 1358:C123,
-the BlueToolFixup configuration in `src/rtl8822ce/BlueToolFixup-RTL8822CU.plist`
-uses AppleUSBHostMergeProperties to publish the internal controller product name.
-It adds entries for the device and its two Bluetooth interfaces under BlueToolFixup’s IOKitPersonalities.
-With AirDrop open on both devices, inspect the controller
+RTW88 bundle in place of the existing RTW88 bundle. The RTL8822CE Wi-Fi baseline on Tahoe 26.7.1 (25G241) is the Sonoma–Tahoe
+binary from the [Realtek AirPort Family 1.0.1 release](https://github.com/xnoah222/Realtek-AirPort-Family/releases/tag/1.0.1).
+Its bundle version is 2.0.1 and the executable SHA-256 is
+`a2723f2531695511f5404a10ee4c586e06504da9561827671a26c2df9756eeb7`.
+The experimental 1.0.2d2 target uses an earlier frontend. To inspect AWDL
+on the experimental build, open AirDrop on both devices and run these commands
 from Terminal:
 
 ```sh
@@ -63,15 +62,41 @@ counts peer action frames submitted to the native manager. The counters
 are published at the first event and every 64 events. Test AirDrop in each
 direction and Handoff independently on hardware.
 
-The upstream prebuilt kext
-is also available in the **Sonoma - Tahoe** folder of the
-[Realtek AirPort Family release](https://github.com/xnoah222/Realtek-AirPort-Family/releases/tag/1.0.1).
 For OpenCore, back up your EFI and use the RTW88 bundle with the Tahoe
 legacy Wi-Fi stack. Enable the driver after its dependencies in
 `Kernel -> Add`, with executable `Contents/MacOS/AirPort_RTW88` and plist
 `Contents/Info.plist`. The RTW89 installer below is for the cards in
 the RTW89 table. For RTW88 compatibility and feature limits, see the
 [AirPort_RTW88 project](https://github.com/xnoah222/Airport_RTW88).
+
+#### RTL8822CU Bluetooth on Tahoe 26.7.1
+
+On the internal USB radio `1358:C123`, the firmware loader published
+`FirmwareLoaded = Yes` and `fw_name = rtl8822cu`. With the previous
+internal-name override, bluetoothd selected `BCM_4350C2`, failed the
+vendor command `Read Verbose Config Version Info` and restarted (reason 108).
+
+For a hardware trial, merge each of the following plist fragments into
+`IOKitPersonalities` in the indicated kext on a backed-up EFI:
+
+| Fragment in `src/rtl8822ce/` | Destination |
+| --- | --- |
+| `BlueToolFixup-RTL8822CU.plist` | `BlueToolFixup.kext/Contents/Info.plist` |
+| `RealtekBluetoothFirmware-RTL8822CU.plist` | `RealtekBluetoothFirmware.kext/Contents/Info.plist` |
+
+When upgrading from 1.0.2d2, remove the three previous BlueToolFixup
+personalities named `Realtek RTL8822CU internal Bluetooth` and
+`Realtek RTL8822CU Bluetooth interface 0` / `1`. Keep the original
+firmware personality `RealtekBluetoothFirmware_1358_c123`. The new device
+personality presents vendor ID `0A12` and the product name `Bluetooth Radio`
+to Tahoe. The additional firmware match checks for the original-vendor marker
+to handle either driver match order. The vendor-ID approach has been
+[reported on a different Tahoe Bluetooth controller](https://github.com/So1jon/Hackintosh-Lenovo-Ideapad-3-15IML05#73-fix).
+
+After reboot, verify that the USB device still has `FirmwareLoaded = Yes`,
+that System Information reports a powered controller with a valid address,
+and that discovery and pairing work. Test sleep/wake and AirDrop separately.
+To roll back, restore both previous Info.plist files together.
 
 ## What works
 

@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Realtek RTL8822CU internal Bluetooth</key>
+	<key>Realtek RTL8822CU Tahoe Bluetooth</key>
 	<dict>
 		<key>CFBundleIdentifier</key>
 		<string>com.apple.driver.AppleUSBHostMergeProperties</string>
@@ -10,6 +10,8 @@
 		<string>AppleUSBHostMergeProperties</string>
 		<key>IOProviderClass</key>
 		<string>IOUSBHostDevice</string>
+		<key>IOMatchCategory</key>
+		<string>RTL8822CUTahoeBluetooth</string>
 		<key>IOProbeScore</key>
 		<integer>5000</integer>
 		<key>idVendor</key>
@@ -18,79 +20,21 @@
 		<integer>49443</integer>
 		<key>bDeviceClass</key>
 		<integer>224</integer>
+		<key>bDeviceSubClass</key>
+		<integer>1</integer>
+		<key>bDeviceProtocol</key>
+		<integer>1</integer>
 		<key>IOProviderMergeProperties</key>
 		<dict>
+			<key>RTL8822CUOriginalVendorID</key>
+			<integer>4952</integer>
+			<key>idVendor</key>
+			<integer>2578</integer>
 			<key>USB Product Name</key>
-			<string>Bluetooth USB Host Controller</string>
+			<string>Bluetooth Radio</string>
 			<key>kUSBProductString</key>
-			<string>Bluetooth USB Host Controller</string>
+			<string>Bluetooth Radio</string>
 		</dict>
-		<key>IOMatchCategory</key>
-		<string>RTL8822CUProductName</string>
-	</dict>
-	<key>Realtek RTL8822CU Bluetooth interface 0</key>
-	<dict>
-		<key>CFBundleIdentifier</key>
-		<string>com.apple.driver.AppleUSBHostMergeProperties</string>
-		<key>IOClass</key>
-		<string>AppleUSBHostMergeProperties</string>
-		<key>IOProviderClass</key>
-		<string>IOUSBHostInterface</string>
-		<key>IOProbeScore</key>
-		<integer>5000</integer>
-		<key>idVendor</key>
-		<integer>4952</integer>
-		<key>idProduct</key>
-		<integer>49443</integer>
-		<key>IOProviderMergeProperties</key>
-		<dict>
-			<key>USB Product Name</key>
-			<string>Bluetooth USB Host Controller</string>
-		</dict>
-		<key>IOMatchCategory</key>
-		<string>RTL8822CUProductName</string>
-		<key>bInterfaceClass</key>
-		<integer>224</integer>
-		<key>bInterfaceSubClass</key>
-		<integer>1</integer>
-		<key>bInterfaceProtocol</key>
-		<integer>1</integer>
-		<key>bConfigurationValue</key>
-		<integer>1</integer>
-		<key>bInterfaceNumber</key>
-		<integer>0</integer>
-	</dict>
-	<key>Realtek RTL8822CU Bluetooth interface 1</key>
-	<dict>
-		<key>CFBundleIdentifier</key>
-		<string>com.apple.driver.AppleUSBHostMergeProperties</string>
-		<key>IOClass</key>
-		<string>AppleUSBHostMergeProperties</string>
-		<key>IOProviderClass</key>
-		<string>IOUSBHostInterface</string>
-		<key>IOProbeScore</key>
-		<integer>5000</integer>
-		<key>idVendor</key>
-		<integer>4952</integer>
-		<key>idProduct</key>
-		<integer>49443</integer>
-		<key>IOProviderMergeProperties</key>
-		<dict>
-			<key>USB Product Name</key>
-			<string>Bluetooth USB Host Controller</string>
-		</dict>
-		<key>IOMatchCategory</key>
-		<string>RTL8822CUProductName</string>
-		<key>bInterfaceClass</key>
-		<integer>224</integer>
-		<key>bInterfaceSubClass</key>
-		<integer>1</integer>
-		<key>bInterfaceProtocol</key>
-		<integer>1</integer>
-		<key>bConfigurationValue</key>
-		<integer>1</integer>
-		<key>bInterfaceNumber</key>
-		<integer>1</integer>
 	</dict>
 </dict>
 </plist>

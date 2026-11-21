@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>RealtekBluetoothFirmware_1358_c123_Tahoe</key>
+	<dict>
+		<key>CFBundleIdentifier</key>
+		<string>org.thegwchr.RealtekBluetoothFirmware</string>
+		<key>IOClass</key>
+		<string>RealtekBluetoothFirmware</string>
+		<key>IOMatchCategory</key>
+		<string>RealtekBluetoothFirmware</string>
+		<key>IOProviderClass</key>
+		<string>IOUSBHostDevice</string>
+		<key>IOProbeScore</key>
+		<integer>4000</integer>
+		<key>idVendor</key>
+		<integer>2578</integer>
+		<key>idProduct</key>
+		<integer>49443</integer>
+		<key>IOPropertyMatch</key>
+		<dict>
+			<key>RTL8822CUOriginalVendorID</key>
+			<integer>4952</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>
