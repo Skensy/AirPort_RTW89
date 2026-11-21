@@ -1,0 +1,31 @@
+--- a/MacKernelSDK/Headers/IOKit/80211/IO80211Controller.h
++++ b/MacKernelSDK/Headers/IOKit/80211/IO80211Controller.h
+@@ -28,1 +28,3 @@
+-#include <net/bpf.h>
++extern "C" {
++#include <net/bpf.h>
++}
+--- a/src/kext/kmod_info.c
++++ b/src/kext/kmod_info.c
+@@ -11 +11 @@
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.1", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d1", _start, _stop)
+--- a/src/kext/AirportRTW88.cpp
++++ b/src/kext/AirportRTW88.cpp
+@@ -105 +105 @@
+-    setProperty("DriverBuild", "2.0.1-wifi-pcie");
++    setProperty("DriverBuild", "2.0.2d1-awdl-retries");
+@@ -1868 +1868 @@
+-            strlcat(label, " (AirPort_RTW88 2.0.0)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d1)", sizeof(label));
+--- a/AirPort_RTW88.kext/Contents/Info.plist
++++ b/AirPort_RTW88.kext/Contents/Info.plist
+@@ -18 +18 @@
+-	<string>AirPort_RTW88 2.0.1 — experimental AWDL peer election v18</string>
++	<string>AirPort_RTW88 2.0.2d1 — RTL8822CE AWDL retry filtering</string>
+@@ -22 +22 @@
+-	<string>2.0.1</string>
++	<string>2.0.2d1</string>
+@@ -24 +24 @@
+-	<string>2.0.1</string>
++	<string>2.0.2d1</string>

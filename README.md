@@ -49,9 +49,33 @@ Its bundle version is 2.0.1 and the executable SHA-256 is
 `a2723f2531695511f5404a10ee4c586e06504da9561827671a26c2df9756eeb7`.
 The [upstream 2.0.1 source archive](https://github.com/xnoah222/Realtek-AirPort-Family/blob/6475f144f9620d1679a788f0f49052d8f06b944a/AirPort_RTW88-Source.zip)
 has SHA-256 `3d696ccc8066603044d280b01e1784bcc91fad1f1c8d2b2156f3df07308a47ba`.
-A local `make airport` in its `Feixiao` directory builds a different executable
-with additional BPF imports. Its driver-version response still says 2.0.0.
+A plain `make airport` in the archive's `Feixiao` directory builds a different
+executable with additional BPF imports and a driver-version response of 2.0.0.
 Use the release executable or a verified EFI backup for exact rollback.
+
+For the Tahoe 2.0.2d1 trial, run `make rtl8822ce-tahoe` on macOS with Xcode.
+It downloads the pinned archive above, checks its SHA-256, builds the upstream
+AWDL retry filter and BSD input/output changes, and packages a signed
+`build/rtl8822ce-tahoe/AirPort_RTW88-2.0.2d1.zip`. The local patch gives
+the BPF imports C linkage and assigns the trial its own version.
+
+On the RTL8822CE with the release driver, the iPhone and Mac saw each other
+in AirDrop, but file transfers stalled. IPv6 echo probes over `awdl0` also
+returned duplicate replies. The trial filters repeated unicast 802.11 data
+frames. A successful file transfer in each direction still needs a hardware test.
+
+To keep the working driver available, extract the trial bundle to
+`EFI/OC/Kexts/AirPort_RTW88-AWDL-test.kext` and change the existing RTW88
+`Kernel -> Add -> BundlePath` to that name. After reboot, check for
+`com.rtw88.airport (2.0.2d1)` in `kmutil showloaded` and inspect the receive
+path and duplicate counter during a transfer:
+
+```sh
+ioreg -r -c AirportRTW88 -l | grep -E '"(DriverBuild|AWDL_RX_DELIVERY_PATH|AWDL_RX_DUPLICATES_DROPPED)"'
+```
+
+To restore the release, set that same `BundlePath` back to
+`AirPort_RTW88.kext` and reboot.
 
 The experimental 1.0.2d2 target in this repository uses an earlier frontend.
 To inspect AWDL on that build, open AirDrop on both devices and run these commands

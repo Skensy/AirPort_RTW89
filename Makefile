@@ -740,6 +740,10 @@ rtl8822ce: $(RTW88_STAGE)/.patched
 	    CC="xcrun clang -O2" \
 	    CXX="xcrun clang++ -O2 -fno-sized-deallocation -fno-use-cxa-atexit -I$(RTW88_SYNC) -include $(RTW88_ABI)/apple80211_var.h -include $(RTW88_ABI)/apple80211_ioctl.h"
 
+.PHONY: rtl8822ce-tahoe
+rtl8822ce-tahoe:
+	sh src/rtl8822ce/build_tahoe_retries.sh "$(abspath $(BUILD_DIR))/rtl8822ce-tahoe"
+
 clean:
 	rm -rf $(BUILD_DIR)
 
