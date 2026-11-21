@@ -716,6 +716,29 @@ release: bundle
 	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1)): AirPort_RTW89.kext and the Kext Installer, commit $$(cat $(BUNDLE)/Contents/Resources/COMMIT)"
 	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
+# RTL8822CE uses the rtw88 PCI transport and firmware.
+RTW88_PORT := third_party/AirPort_RTW88
+RTW88_ABI := $(abspath third_party/MacKernelSDK/Headers/IOKit/80211)
+RTW88_STAGE := $(abspath $(BUILD_DIR)/rtw88/src)
+RTW88_SYNC := $(abspath src/compat_rtw89)
+RTW88_LOCAL := $(abspath src/rtl8822ce)
+
+$(RTW88_STAGE)/.patched: $(RTW88_LOCAL)/awdl.patch $(wildcard $(RTW88_PORT)/src/kext/*)
+	@mkdir -p "$(RTW88_STAGE)/kext"
+	@cp $(RTW88_PORT)/src/kext/* "$(RTW88_STAGE)/kext/"
+	@ln -sfn "$(abspath $(RTW88_PORT)/src/compat)" "$(RTW88_STAGE)/compat"
+	@cd "$(RTW88_STAGE)/kext" && patch -p1 < "$(RTW88_LOCAL)/awdl.patch"
+	@touch "$@"
+
+.PHONY: rtl8822ce
+rtl8822ce: $(RTW88_STAGE)/.patched
+	$(MAKE) -C $(RTW88_PORT) -f Makefile -f "$(RTW88_LOCAL)/awdl.mk" airport \
+	    BUILD_DIR="$(abspath $(BUILD_DIR)/rtw88)" OUT_DIR="$(abspath $(BUILD_DIR)/out)" \
+	    MKSDK="$(abspath third_party/MacKernelSDK)" KEXT_SRC="$(RTW88_STAGE)/kext" RTW88_SYNC="$(RTW88_SYNC)" RTW88_LOCAL="$(RTW88_LOCAL)" \
+	    AIRPORT_KEXT_SKEL="$(RTW88_LOCAL)/bundle" \
+	    CC="xcrun clang -O2" \
+	    CXX="xcrun clang++ -O2 -fno-sized-deallocation -fno-use-cxa-atexit -I$(RTW88_SYNC) -include $(RTW88_ABI)/apple80211_var.h -include $(RTW88_ABI)/apple80211_ioctl.h"
+
 clean:
 	rm -rf $(BUILD_DIR)
 

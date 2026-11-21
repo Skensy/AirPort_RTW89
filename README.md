@@ -23,6 +23,52 @@ Mac's own.
 
 USB versions of these cards are not supported.
 
+### RTL8822CE on macOS Tahoe
+
+The RTL8822CE (`10EC:C822` or `10EC:C82F`, Wi-Fi 5) has a separate
+`AirPort_RTW88.kext` target. It uses the pinned AirPort_RTW88 frontend,
+rtw88 PCIe backend and embedded RTL8822C firmware. On macOS with Xcode
+Command Line Tools, run these commands from the repository root:
+
+```sh
+git submodule update --init --recursive third_party/AirPort_RTW88 third_party/rtw88-stable
+make rtl8822ce
+```
+
+The output is `build/out/AirPort_RTW88.kext`. The experimental 1.0.2d1
+build connects the AWDL virtual interface to the rtw88 radio on a single
+social channel (6, 44 or 149). For an associated test, put the access point
+on an allowed fixed social channel and join it first. The driver pauses its
+periodic sync transmissions during physical scans. Channel hopping while
+associated is currently unsupported.
+
+Use a bootable USB copy of your EFI for this experiment. Load the source-built
+RTW88 bundle in place of the existing RTW88 bundle. On Tahoe 26.7.x, the
+BroadTek Bluetooth companion can be tested alongside RealtekBluetoothFirmware
+and BlueToolFixup. With AirDrop open on both devices, inspect the controller
+from Terminal:
+
+```sh
+kmutil showloaded | grep -Ei 'rtw88|broadtek'
+ifconfig awdl0
+ioreg -r -c AirportRTW88 -l | grep RTW88AWDL
+```
+
+`RTW88AWDLSyncTX` counts locally queued sync frames. `RTW88AWDLActionRX`
+counts peer action frames submitted to the native manager. The counters
+are published at the first event and every 64 events. Test AirDrop in each
+direction and Handoff independently on hardware.
+
+The upstream prebuilt kext
+is also available in the **Sonoma - Tahoe** folder of the
+[Realtek AirPort Family release](https://github.com/xnoah222/Realtek-AirPort-Family/releases/tag/1.0.1).
+For OpenCore, back up your EFI and use the RTW88 bundle with the Tahoe
+legacy Wi-Fi stack. Enable the driver after its dependencies in
+`Kernel -> Add`, with executable `Contents/MacOS/AirPort_RTW88` and plist
+`Contents/Info.plist`. The RTW89 installer below is for the cards in
+the RTW89 table. For RTW88 compatibility and feature limits, see the
+[AirPort_RTW88 project](https://github.com/xnoah222/Airport_RTW88).
+
 ## What works
 
 - **Networks:** WPA3, WPA2 (Personal and Enterprise), open, phone hotspots.
