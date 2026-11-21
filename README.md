@@ -104,6 +104,14 @@ that System Information reports a powered controller with a valid address,
 and that discovery and pairing work. Test sleep/wake and AirDrop separately.
 To roll back, restore both previous Info.plist files together.
 
+With these personalities, Tahoe 26.7.1 reported a powered RTL8822CU as
+`THIRD_PARTY_DONGLE` with a valid address. For an AirDrop trial using the
+standalone BroadTek 0.2.0 release, enable it after Lilu and add its
+plugin-specific `-broadtekbeta` boot argument. The release declares Darwin
+22 through 24 in its [Lilu configuration](https://github.com/FranciumOS-org/BroadTek/blob/2654ad368f39e833b03fd521b877a116dd015e00/src/plugin/kern_start.cpp#L11-L30).
+Tahoe uses Darwin 25. After reboot, check `broadtek-patcher-ran` and
+`broadtek-hooks` in IORegistry, then test a transfer in each direction.
+
 ## What works
 
 - **Networks:** WPA3, WPA2 (Personal and Enterprise), open, phone hotspots.
