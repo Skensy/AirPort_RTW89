@@ -723,11 +723,12 @@ RTW88_STAGE := $(abspath $(BUILD_DIR)/rtw88/src)
 RTW88_SYNC := $(abspath src/compat_rtw89)
 RTW88_LOCAL := $(abspath src/rtl8822ce)
 
-$(RTW88_STAGE)/.patched: $(RTW88_LOCAL)/awdl.patch $(wildcard $(RTW88_PORT)/src/kext/*)
+$(RTW88_STAGE)/.patched: $(RTW88_LOCAL)/awdl.patch $(RTW88_LOCAL)/station.patch $(wildcard $(RTW88_PORT)/src/kext/*)
 	@mkdir -p "$(RTW88_STAGE)/kext"
-	@cp $(RTW88_PORT)/src/kext/* "$(RTW88_STAGE)/kext/"
+	@for file in $(RTW88_PORT)/src/kext/*; do tr -d '\r' < "$$file" > "$(RTW88_STAGE)/kext/$${file##*/}"; done
 	@ln -sfn "$(abspath $(RTW88_PORT)/src/compat)" "$(RTW88_STAGE)/compat"
 	@cd "$(RTW88_STAGE)/kext" && patch -p1 < "$(RTW88_LOCAL)/awdl.patch"
+	@cd "$(RTW88_STAGE)/kext" && patch -p1 < "$(RTW88_LOCAL)/station.patch"
 	@touch "$@"
 
 .PHONY: rtl8822ce

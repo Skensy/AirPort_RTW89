@@ -35,8 +35,8 @@ git submodule update --init --recursive third_party/AirPort_RTW88 third_party/rt
 make rtl8822ce
 ```
 
-The output is `build/out/AirPort_RTW88.kext`. The experimental 1.0.2d1
-build connects the AWDL virtual interface to the rtw88 radio on a single
+The output is `build/out/AirPort_RTW88.kext`. The experimental 1.0.2d2
+build translates Tahoe station scan and association requests and connects the AWDL virtual interface to the rtw88 radio on a single
 social channel (6, 44 or 149). For an associated test, put the access point
 on an allowed fixed social channel and join it first. The driver pauses its
 periodic sync transmissions during physical scans. Channel hopping while
@@ -45,7 +45,11 @@ associated is currently unsupported.
 Use a bootable USB copy of your EFI for this experiment. Load the source-built
 RTW88 bundle in place of the existing RTW88 bundle. On Tahoe 26.7.x, the
 BroadTek Bluetooth companion can be tested alongside RealtekBluetoothFirmware
-and BlueToolFixup. With AirDrop open on both devices, inspect the controller
+and BlueToolFixup. For the internal Bluetooth radio with USB ID 1358:C123,
+the BlueToolFixup configuration in `src/rtl8822ce/BlueToolFixup-RTL8822CU.plist`
+uses AppleUSBHostMergeProperties to publish the internal controller product name.
+It adds entries for the device and its two Bluetooth interfaces under BlueToolFixup’s IOKitPersonalities.
+With AirDrop open on both devices, inspect the controller
 from Terminal:
 
 ```sh
