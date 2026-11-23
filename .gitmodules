@@ -1,6 +1,0 @@
-[submodule "third_party/AirPort_RTW88"]
-	path = third_party/AirPort_RTW88
-	url = https://github.com/xnoah222/Airport_RTW88.git
-[submodule "third_party/rtw88-stable"]
-	path = third_party/rtw88-stable
-	url = https://github.com/thegwchr/rtw88-stable.git

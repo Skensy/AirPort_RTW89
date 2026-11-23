@@ -25,63 +25,37 @@ USB versions of these cards are not supported.
 
 ### RTL8822CE on macOS Tahoe
 
-The RTL8822CE (`10EC:C822` or `10EC:C82F`, Wi-Fi 5) has a separate
-`AirPort_RTW88.kext` target. It uses the pinned AirPort_RTW88 frontend,
-rtw88 PCIe backend and embedded RTL8822C firmware. On macOS with Xcode
-Command Line Tools, run these commands from the repository root:
+The stable pair for this card on Tahoe 26.7.1 is **AirPort_RTW88 2.0.2d2**
+(`2.0.2d2-awdl-multicast`) and **OwlyAirLinkBridge 0.1.0** built for its
+UUID. File transfers worked in both directions between the Mac and an iPhone.
+The RTL8822CE uses the software scanner for ordinary Wi-Fi.
 
-```sh
-git submodule update --init --recursive third_party/AirPort_RTW88 third_party/rtw88-stable
-make rtl8822ce
-```
+The upstream source archive is included verbatim in `third_party/rtl8822ce`
+with its original notices. This repository's Tahoe integration applies its own
+patches during local builds. [Upstream source snapshot](https://github.com/xnoah222/Realtek-AirPort-Family/tree/6475f144f9620d1679a788f0f49052d8f06b944a)
 
-The output is `build/out/AirPort_RTW88.kext`. The experimental 1.0.2d2
-build translates Tahoe station scan and association requests and connects the AWDL virtual interface to the rtw88 radio on a single
-social channel (6, 44 or 149). For an associated test, put the access point
-on an allowed fixed social channel and join it first. The driver pauses its
-periodic sync transmissions during physical scans. Channel hopping while
-associated is currently unsupported.
+On a macOS build host with the x86_64 toolchain in Xcode, run **`make rtl8822ce`**
+(or just `make`). This prepares the pinned source archive, applies the two
+driver patches, runs the version and AWDL checks and compiles both kexts.
+The build verifies both executable hashes against the working EFI. To inspect
+the patched source before building, run `make rtl8822ce-source`. The driver
+source is in `build/rtl8822ce/source/AirPort_RTW88/Feixiao/src` and the
+Linux transport is next to Feixiao in `rtw88-stable`.
 
-Use a bootable USB copy of your EFI for this experiment. Load the source-built
-RTW88 bundle in place of the existing RTW88 bundle. The RTL8822CE Wi-Fi baseline on Tahoe 26.7.1 (25G241) is the Sonoma–Tahoe
-binary from the [Realtek AirPort Family 1.0.1 release](https://github.com/xnoah222/Realtek-AirPort-Family/releases/tag/1.0.1).
-Its bundle version is 2.0.1 and the executable SHA-256 is
-`a2723f2531695511f5404a10ee4c586e06504da9561827671a26c2df9756eeb7`.
-The [upstream 2.0.1 source archive](https://github.com/xnoah222/Realtek-AirPort-Family/blob/6475f144f9620d1679a788f0f49052d8f06b944a/AirPort_RTW88-Source.zip)
-has SHA-256 `3d696ccc8066603044d280b01e1784bcc91fad1f1c8d2b2156f3df07308a47ba`.
-A plain `make airport` in the archive's `Feixiao` directory builds a different
-executable with additional BPF imports and a driver-version response of 2.0.0.
-Use the release executable or a verified EFI backup for exact rollback.
+| Build output under `build/rtl8822ce/` | SHA-256 of the Mach-O executable |
+| --- | --- |
+| `AirPort_RTW88-2.0.2d2.zip` | `ac1c6dff6ed6953e37b8799b9946ecb632cfd3494f31eba2b4b91cb763b53025` |
+| `OwlyAirLinkBridge-rtl8822ce-2.0.2d2.zip` | `a7b75a5b8b02c293fdfcb6e432350fcfba6cdd929d2f9cdae4a5ea1b7200c3b5` |
 
-For the Tahoe 2.0.2d1 trial, run `make rtl8822ce-tahoe` on macOS with Xcode.
-It downloads the pinned archive above, checks its SHA-256, builds the upstream
-AWDL retry filter and BSD input/output changes, and packages a signed
-`build/rtl8822ce-tahoe/AirPort_RTW88-2.0.2d1.zip`. The local patch gives
-the BPF imports C linkage and assigns the trial its own version.
-
-On the RTL8822CE with the release driver, the iPhone and Mac saw each other
-in AirDrop, but file transfers stalled. IPv6 echo probes over `awdl0` also
-returned duplicate replies. The trial filters repeated unicast 802.11 data
-frames. A successful file transfer in each direction still needs a hardware test.
-
-To keep the working driver available, extract the trial bundle to
-`EFI/OC/Kexts/AirPort_RTW88-AWDL-test.kext` and change the existing RTW88
-`Kernel -> Add -> BundlePath` to that name. After reboot, check for
-`com.rtw88.airport (2.0.2d1)` in `kmutil showloaded` and inspect the receive
-path and duplicate counter during a transfer:
-
-```sh
-ioreg -r -c AirportRTW88 -l | grep -E '"(DriverBuild|AWDL_RX_DELIVERY_PATH|AWDL_RX_DUPLICATES_DROPPED)"'
-```
-
-To restore the release, set that same `BundlePath` back to
-`AirPort_RTW88.kext` and reboot.
+The working OpenCore configuration loads the bridge after Lilu and the driver
+after IO80211FamilyLegacy. The corresponding EFI directory names are
+`OwlyAirLinkBridge-RTW88-multicast.kext` and `AirPort_RTW88-AWDL-multicast.kext`.
+The RTW89 installation instructions below apply to a separate family of cards.
 
 #### Station Wi-Fi with the 2.0.2d2 multicast build
 
 On 23 November 2026, one RTL8822CE running Tahoe 26.7.1 (25G241) and
 `2.0.2d2-awdl-multicast` produced the following results on three networks.
-The tested build is on the [multicast branch](https://github.com/Skensy/AirPort_RTW89/tree/codex/rtl8822ce-awdl-multicast).
 
 | Network | Observed result |
 | --- | --- |
@@ -93,28 +67,6 @@ The driver executable was the same for all three tests. The access point,
 channel and boot session varied across trials, so the cause of the TIM
 disconnect remains open. These checks exercised ordinary Wi-Fi. Wireless
 Continuity Camera remains unverified on this build.
-
-The experimental 1.0.2d2 target in this repository uses an earlier frontend.
-To inspect AWDL on that build, open AirDrop on both devices and run these commands
-from Terminal:
-
-```sh
-kmutil showloaded | grep -Ei 'rtw88|broadtek'
-ifconfig awdl0
-ioreg -r -c AirportRTW88 -l | grep RTW88AWDL
-```
-
-`RTW88AWDLSyncTX` counts locally queued sync frames. `RTW88AWDLActionRX`
-counts peer action frames submitted to the native manager. The counters
-are published at the first event and every 64 events. Test AirDrop in each
-direction and Handoff independently on hardware.
-
-For OpenCore, back up your EFI and use the RTW88 bundle with the Tahoe
-legacy Wi-Fi stack. Enable the driver after its dependencies in
-`Kernel -> Add`, with executable `Contents/MacOS/AirPort_RTW88` and plist
-`Contents/Info.plist`. The RTW89 installer below is for the cards in
-the RTW89 table. For RTW88 compatibility and feature limits, see the
-[AirPort_RTW88 project](https://github.com/xnoah222/Airport_RTW88).
 
 #### RTL8822CU Bluetooth on Tahoe 26.7.1
 

@@ -1,0 +1,79 @@
+--- a/OwlyTargets.hpp
++++ b/OwlyTargets.hpp
+@@ -15 +15 @@
+-    "/System/Library/Extensions/AirPortRTW89Front-ABI5EB.kext/Contents/MacOS/AirPortRTW89Front"
++    "/Library/Extensions/AirPort_RTW88.kext/Contents/MacOS/AirPort_RTW88"
+@@ -19 +19 @@
+-    {"com.rtw89.front", frontendPaths, 1, {true}, {}, 0}
++    {"com.rtw88.airport", frontendPaths, 1, {true}, {}, 0}
+--- a/Plugin.cpp
++++ b/Plugin.cpp
+@@ -108,0 +109,9 @@
++static bool stringPropertyMatches(IORegistryEntry *entry, const char *key, const char *value)
++{
++    OSObject *property = entry->copyProperty(key);
++    const OSString *string = OSDynamicCast(OSString, property);
++    bool matches = string && string->isEqualTo(value);
++    if (property) property->release();
++    return matches;
++}
++
+@@ -112,3 +121,2 @@
+-    if (!vif || !vif->metaCast("IO80211P2PInterface")) return false;
+-    const auto *role = OSDynamicCast(OSString, vif->getProperty("IO80211VirtualInterfaceRole"));
+-    const auto *bsd = OSDynamicCast(OSString, vif->getProperty("IOInterfaceName"));
++    if (!vif || !vif->metaCast("IO80211P2PInterface") || vif->isInactive() ||
++        !(vif->getState() & kIOServiceRegisteredState)) return false;
+@@ -116 +124 @@
+-    if (!role || !role->isEqualTo("AirLink")) return false;
++    if (!stringPropertyMatches(vif, "IO80211VirtualInterfaceRole", "AirLink")) return false;
+@@ -118,6 +126,2 @@
+-    if (!bsd || bsd->getLength() < 5 ||
+-        bsd->getLength() >= 16 || strncmp(bsd->getCStringNoCopy(), "awdl", 4)) return false;
+-    const char *s = bsd->getCStringNoCopy();
+-    for (unsigned i = 4; i < bsd->getLength(); i++)
+-        if (s[i] < '0' || s[i] > '9') return false;
+-    bool found = false;
++    if (!stringPropertyMatches(vif, "IOInterfaceName", "awdl0")) return false;
++
+@@ -125,10 +129,14 @@
+-    IOService *provider = vif;
+-    for (unsigned depth = 0; provider && depth < 8; depth++, provider = provider->getProvider()) {
+-        if (provider->metaCast("AirPortRTW89Front")) {
+-            if (reason) *reason = 5;
+-            const auto *ready = OSDynamicCast(OSNumber, provider->getProperty("OWLY C2 native_vif_ready"));
+-            found = ready && ready->unsigned32BitValue() == 1;
+-            break;
+-        }
+-    }
+-    if (!found) return false;
++    IORegistryEntry *parent = vif->copyParentEntry(gIOServicePlane);
++    IOService *radio = OSDynamicCast(IOService, parent);
++    bool ready = false;
++    if (radio && radio->metaCast("AirportRTW88") && !radio->isInactive() &&
++        (radio->getState() & kIOServiceRegisteredState) &&
++        stringPropertyMatches(radio, "DriverBuild", "2.0.2d1-awdl-retries") &&
++        stringPropertyMatches(radio, "AWDL_OUTPUT_FILTER_BSD", "awdl0")) {
++        OSObject *bootstrap = radio->copyProperty("AWDL_BOOTSTRAP_READY");
++        ready = bootstrap == kOSBooleanTrue;
++        if (bootstrap) bootstrap->release();
++    }
++    if (parent) parent->release();
++    if (!ready) return false;
++
+@@ -136 +144 @@
+-    memcpy(name, s, bsd->getLength());
++    memcpy(name, "awdl0", sizeof("awdl0"));
+@@ -360,12 +367,0 @@
+-    if(result==kIOReturnSuccess) {
+-        /* The scoped native path may initialize Legacy's AWDL scratch and
+-         * call private ABI only after this plugin has verified both image
+-         * UUIDs, method prefixes, native table and the real entitled client. */
+-        IOService *provider=vif;
+-        for(unsigned depth=0;provider && depth<8;depth++,provider=provider->getProvider()) {
+-            if(provider->metaCast("AirPortRTW89Front")) {
+-                provider->setProperty("OwlyNativeABIReady",true);
+-                break;
+-            }
+-        }
+-    }

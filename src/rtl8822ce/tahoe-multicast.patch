@@ -1,0 +1,222 @@
+diff -ruN base/Feixiao/AirPort_RTW88.kext/Contents/Info.plist next/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
+--- a/AirPort_RTW88.kext/Contents/Info.plist	2026-11-21 16:40:23
++++ b/AirPort_RTW88.kext/Contents/Info.plist	2026-11-21 16:40:32
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d1 — RTL8822CE AWDL retry filtering</string>
++	<string>AirPort_RTW88 2.0.2d2 — RTL8822CE AWDL multicast queue</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d1</string>
++	<string>2.0.2d2</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d1</string>
++	<string>2.0.2d2</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+diff -ruN base/Feixiao/src/compat/linux/skbuff.h next/Feixiao/src/compat/linux/skbuff.h
+--- a/src/compat/linux/skbuff.h	2026-11-21 16:40:23
++++ b/src/compat/linux/skbuff.h	2026-11-21 16:40:39
+@@ -47,6 +47,15 @@
+      */
+     u8         rtw_tx_report_sn;
+     bool       rtw_tx_report_sn_valid;
++
++    /*
++     * Set only by txAWDLDataFrame() for multicast AWDL DATA.  The rtw88 core
++     * would otherwise route every group-addressed data frame to the HIGH/HI0
++     * ring; rtw_tx_queue_mapping() consumes this tag to keep the one
++     * software-scheduled AWDL path on its normal BE ring.  alloc_skb() uses
++     * kzalloc(), so every other producer starts with the tag false.
++     */
++    bool       rtw_tx_awdl_group_data;
+ };
+ 
+ /* sk_buff_head — queue */
+diff -ruN base/Feixiao/src/kext/AirportRTW88.cpp next/Feixiao/src/kext/AirportRTW88.cpp
+--- a/src/kext/AirportRTW88.cpp	2026-11-21 16:40:23
++++ b/src/kext/AirportRTW88.cpp	2026-11-21 16:40:29
+@@ -102,7 +102,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d1-awdl-retries");
++    setProperty("DriverBuild", "2.0.2d2-awdl-multicast");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1865,7 +1865,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d1)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d2)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+diff -ruN base/Feixiao/src/kext/RTW88IEEE80211.cpp next/Feixiao/src/kext/RTW88IEEE80211.cpp
+--- a/src/kext/RTW88IEEE80211.cpp	2026-11-21 16:40:23
++++ b/src/kext/RTW88IEEE80211.cpp	2026-11-21 16:40:39
+@@ -3869,6 +3869,7 @@
+     memset(info, 0, sizeof(*info));
+     info->flags = IEEE80211_TX_CTL_FIRST_FRAGMENT;
+     const bool multicast = (eh[0] & 1U) != 0;
++    skb->rtw_tx_awdl_group_data = multicast;
+     if (multicast) {
+         info->flags |= IEEE80211_TX_CTL_NO_ACK;
+         __atomic_add_fetch(&_awdlTxMulticastSubmitted, 1U, __ATOMIC_RELAXED);
+diff -ruN base/Feixiao/src/kext/kmod_info.c next/Feixiao/src/kext/kmod_info.c
+--- a/src/kext/kmod_info.c	2026-11-21 16:40:23
++++ b/src/kext/kmod_info.c	2026-11-21 16:40:29
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d1", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d2", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+diff -ruN base/Feixiao/tests/test_v217_awdl_multicast_queue.py next/Feixiao/tests/test_v217_awdl_multicast_queue.py
+--- a/tests/test_v217_awdl_multicast_queue.py	1970-01-01 01:00:00
++++ b/tests/test_v217_awdl_multicast_queue.py	2026-11-21 16:41:15
+@@ -0,0 +1,121 @@
++"""Only txAWDLDataFrame() multicast DATA moves off the generic HI0 ring."""
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[1]
++source = (root.parent / 'rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c').read_text()
++ieee = (root / 'src/kext/RTW88IEEE80211.cpp').read_text()
++skbuff = (root / 'src/compat/linux/skbuff.h').read_text()
++
++
++def extract_block(signature, end='};'):
++    start = source.index(signature)
++    stop = source.index(end, start) + len(end)
++    return source[start:stop]
++
++
++def extract_function(signature):
++    start = source.index(signature)
++    end = source.index('{', start) + 1
++    depth = 1
++    while depth:
++        depth += (source[end] == '{') - (source[end] == '}')
++        end += 1
++    return source[start:end]
++
++
++code = r'''
++#include <cassert>
++#include <cstdint>
++#include <cstring>
++using u8 = uint8_t;
++using u16 = uint16_t;
++using __le16 = uint16_t;
++struct ieee80211_hdr { __le16 frame_control; __le16 duration_id; u8 addr1[6]; };
++struct sk_buff { u8 *data; unsigned len; u16 queue_mapping;
++                  bool rtw_tx_awdl_group_data; };
++enum rtw_tx_queue_type {
++    RTW_TX_QUEUE_BK, RTW_TX_QUEUE_BE, RTW_TX_QUEUE_VI, RTW_TX_QUEUE_VO,
++    RTW_TX_QUEUE_BCN, RTW_TX_QUEUE_MGMT, RTW_TX_QUEUE_HI0,
++};
++enum ieee80211_ac_numbers { IEEE80211_AC_VO, IEEE80211_AC_VI,
++                            IEEE80211_AC_BE, IEEE80211_AC_BK };
++#define IEEE80211_NUM_ACS 4
++#define unlikely(x) (x)
++#define WARN_ON(x) (x)
++#define WARN_ON_ONCE(x) (x)
++#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
++static inline u16 skb_get_queue_mapping(const sk_buff *skb) { return skb->queue_mapping; }
++static inline bool ieee80211_is_beacon(__le16 fc) { return (fc & 0x00fc) == 0x0080; }
++static inline bool ieee80211_is_mgmt(__le16 fc) { return (fc & 0x000c) == 0x0000; }
++static inline bool ieee80211_is_ctl(__le16 fc) { return (fc & 0x000c) == 0x0004; }
++static inline bool is_broadcast_ether_addr(const u8 *a) {
++    return a[0] == 0xff && a[1] == 0xff && a[2] == 0xff &&
++           a[3] == 0xff && a[4] == 0xff && a[5] == 0xff;
++}
++static inline bool is_multicast_ether_addr(const u8 *a) { return a[0] & 1; }
++''' + extract_block('static const enum rtw_tx_queue_type ac_to_hwq[]') + r'''
++static_assert(ARRAY_SIZE(ac_to_hwq) == IEEE80211_NUM_ACS);
++''' + extract_function('enum rtw_tx_queue_type rtw_tx_ac_to_hwq(') + extract_function(
++    'enum rtw_tx_queue_type rtw_tx_queue_mapping(') + r'''
++static rtw_tx_queue_type q(u16 fc, u8 first_addr, u16 ac, bool tag) {
++    ieee80211_hdr hdr = {};
++    sk_buff skb = {};
++    hdr.frame_control = fc;
++    memset(hdr.addr1, 0x22, sizeof(hdr.addr1));
++    hdr.addr1[0] = first_addr;
++    skb.data = reinterpret_cast<u8 *>(&hdr);
++    skb.len = 8;
++    skb.queue_mapping = ac;
++    skb.rtw_tx_awdl_group_data = tag;
++    return rtw_tx_queue_mapping(&skb);
++}
++
++int main() {
++    // Beacon, management and control keep their priority over any tag.
++    assert(q(0x0080, 0xff, IEEE80211_AC_VO, true) == RTW_TX_QUEUE_BCN);
++    assert(q(0x00d0, 0xff, IEEE80211_AC_BE, true) == RTW_TX_QUEUE_MGMT);
++    assert(q(0x0084, 0x01, IEEE80211_AC_BE, true) == RTW_TX_QUEUE_MGMT);
++    // Unmarked group data, including broadcast, is still the generic HI0 path.
++    assert(q(0x0008, 0x01, IEEE80211_AC_BE, false) == RTW_TX_QUEUE_HI0);
++    assert(q(0x0008, 0xff, IEEE80211_AC_VO, false) == RTW_TX_QUEUE_HI0);
++    // Only the tagged AWDL group DATA uses the normal BE ring.
++    assert(q(0x0008, 0x01, IEEE80211_AC_BE, true) == RTW_TX_QUEUE_BE);
++    assert(q(0x0008, 0xff, IEEE80211_AC_VO, true) == RTW_TX_QUEUE_BE);
++    // Tagged unicast is not a group frame: normal AC mapping is untouched.
++    assert(q(0x0008, 0x22, IEEE80211_AC_VO, true) == RTW_TX_QUEUE_VO);
++    assert(q(0x0008, 0x22, IEEE80211_AC_BE, true) == RTW_TX_QUEUE_BE);
++    assert(q(0x0008, 0x22, IEEE80211_AC_VO, false) == RTW_TX_QUEUE_VO);
++    assert(q(0x0008, 0x22, IEEE80211_AC_BE, false) == RTW_TX_QUEUE_BE);
++    // Out-of-range unicast mappings still fall back to BE; group precedence
++    // is unchanged and a tagged group frame still selects BE.
++    assert(q(0x0008, 0x22, 4, false) == RTW_TX_QUEUE_BE);
++    assert(q(0x0008, 0x01, 4, false) == RTW_TX_QUEUE_HI0);
++    assert(q(0x0008, 0x01, 4, true) == RTW_TX_QUEUE_BE);
++}
++'''
++
++with tempfile.TemporaryDirectory() as td:
++    path = Path(td)
++    (path / 'test.cpp').write_text(code)
++    subprocess.run(['xcrun', 'clang++', '-std=c++17',
++                    '-Wno-c99-designator',
++                    '-Wno-tautological-constant-out-of-range-compare',
++                    '-fsanitize=address,undefined',
++                    str(path / 'test.cpp'), '-o', str(path / 'test')], check=True)
++    subprocess.run([str(path / 'test')], check=True)
++
++# The tag is producer-owned and initialized for both unicast and multicast.
++producer = ieee[ieee.index('bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m)'):]
++producer = producer[:producer.index('\n}\n') + 3]
++assert 'skb->rtw_tx_awdl_group_data = multicast;' in producer
++assert producer.index('rtw_tx_awdl_group_data') > producer.index('const bool multicast')
++assert 'info->flags |= IEEE80211_TX_CTL_NO_ACK;' in producer
++assert 'rtw_tx_awdl_group_data;' in skbuff
++writes = sum(len(re.findall(r'rtw_tx_awdl_group_data\s*=', text))
++             for text in (ieee, source, skbuff))
++assert writes == 1, 'the tag must have a single producer-owned writer'
++print('PASS: production queue mapping keeps AWDL group DATA on BE; unicast, '
++      'management/control, beacon and unmarked group paths unchanged')
+diff -ruN base/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c next/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+--- a/../rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c	2026-11-21 16:40:22
++++ b/../rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c	2026-11-21 16:40:39
+@@ -865,6 +865,10 @@
+ 		queue = RTW_TX_QUEUE_BCN;
+ 	else if (unlikely(ieee80211_is_mgmt(fc) || ieee80211_is_ctl(fc)))
+ 		queue = RTW_TX_QUEUE_MGMT;
++	else if (skb->rtw_tx_awdl_group_data &&
++		 (is_broadcast_ether_addr(hdr->addr1) ||
++		  is_multicast_ether_addr(hdr->addr1)))
++		queue = RTW_TX_QUEUE_BE;
+ 	else if (is_broadcast_ether_addr(hdr->addr1) ||
+ 		 is_multicast_ether_addr(hdr->addr1))
+ 		queue = RTW_TX_QUEUE_HI0;

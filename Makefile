@@ -10,6 +10,8 @@
 #   make kext                    # build/out/AirPort_RTW89.kext (runs hosttest first)
 #
 
+.DEFAULT_GOAL := rtl8822ce
+
 HOST_CPUS    := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 MAKEFLAGS    += -j$(HOST_CPUS)
 
@@ -623,9 +625,11 @@ BUNDLE := $(BUILD_DIR)/out/bundle/AirPort_RTW89.kext
 # ---- RTLAirLink's Lilu event bridge (bridge/), nested in the bundle ----
 # It hooks the family's event user client for wifip2pd, and only for the
 # front it was built with: the front's UUID is written into the copy of
-# Plugin.cpp that is compiled (as RTLAirLink's build.py does). Active only
-# with the boot-args -owlyeb1 owlyebstage=4.
+# Plugin.cpp that is compiled (as RTLAirLink's build.py does).
 BRIDGE_DIR    := $(PROJ_ROOT)/bridge
+BRIDGE_PLIST  ?= $(BRIDGE_DIR)/Info.plist
+BRIDGE_SRC    ?= $(BRIDGE_DIR)/src
+BRIDGE_DEPS   ?= front
 BRIDGE_BUNDLE := $(BUILD_DIR)/out/OwlyAirLinkBridge.kext
 BRIDGE_BIN    := $(BRIDGE_BUNDLE)/Contents/MacOS/OwlyAirLinkBridge
 BRIDGE_OBJ    := $(BUILD_DIR)/bridge
@@ -633,7 +637,7 @@ BRIDGE_VER    := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' $(B
 CLANG_RES     := $(shell xcrun clang -print-resource-dir 2>/dev/null)
 BRIDGE_COMMON := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                  -isystem $(CLANG_RES)/include -I$(MKSDK)/Headers \
-                 -I$(BRIDGE_DIR)/vendor/Lilu -I$(BRIDGE_DIR)/src \
+                 -I$(BRIDGE_DIR)/vendor/Lilu -I$(BRIDGE_SRC) \
                  -O2 -fno-strict-aliasing -fwrapv -mkernel -fno-exceptions \
                  -fno-builtin -fno-common -fno-stack-protector -fno-omit-frame-pointer \
                  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -D__PRIVATE_SPI__ \
@@ -642,24 +646,25 @@ BRIDGE_COMMON := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                  -Wall -Wextra -Wframe-larger-than=1024
 BRIDGE_CXX    := -std=gnu++17 -fapple-kext -fno-rtti
 FRONT_UUID     = $(shell xcrun dwarfdump --uuid $(FRONT_BUNDLE)/Contents/MacOS/AirPortRTW89Front | sed -n 's/^UUID: \([0-9A-F-]*\) (x86_64).*/\1/p')
+BRIDGE_UUID   ?= $(FRONT_UUID)
 
 .PHONY: bridge
-bridge: front
+bridge: $(BRIDGE_DEPS)
 	@mkdir -p $(BRIDGE_OBJ) $(BRIDGE_BUNDLE)/Contents/MacOS
-	@python3 tools/bind_bridge.py "$(FRONT_UUID)" $(BRIDGE_DIR)/src/Plugin.cpp $(BRIDGE_OBJ)/Plugin.cpp
-	@echo "  CC   bridge (Lilu plugin, bound to front $(FRONT_UUID))"
-	@$(CC) $(BRIDGE_COMMON) -std=gnu11 -c $(BRIDGE_DIR)/src/owly_event_core.c -o $(BRIDGE_OBJ)/core.o
+	@python3 tools/bind_bridge.py "$(BRIDGE_UUID)" $(BRIDGE_SRC)/Plugin.cpp $(BRIDGE_OBJ)/Plugin.cpp
+	@echo "  CC   bridge (Lilu plugin, bound to $(BRIDGE_UUID))"
+	@$(CC) $(BRIDGE_COMMON) -std=gnu11 -c $(BRIDGE_SRC)/owly_event_core.c -o $(BRIDGE_OBJ)/core.o
 	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_OBJ)/Plugin.cpp -o $(BRIDGE_OBJ)/plugin.o
-	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_DIR)/src/Bootstrap.cpp -o $(BRIDGE_OBJ)/bootstrap.o
-	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_DIR)/src/Service.cpp -o $(BRIDGE_OBJ)/service.o
-	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_DIR)/src/Status.cpp -o $(BRIDGE_OBJ)/status.o
+	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_SRC)/Bootstrap.cpp -o $(BRIDGE_OBJ)/bootstrap.o
+	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_SRC)/Service.cpp -o $(BRIDGE_OBJ)/service.o
+	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_SRC)/Status.cpp -o $(BRIDGE_OBJ)/status.o
 	@$(CXX) $(BRIDGE_COMMON) $(BRIDGE_CXX) -c $(BRIDGE_DIR)/vendor/Lilu/Library/plugin_start.cpp -o $(BRIDGE_OBJ)/start.o
-	@$(CC) $(BRIDGE_COMMON) -std=gnu11 -c $(BRIDGE_DIR)/src/kmod_info.c -o $(BRIDGE_OBJ)/kmod.o
-	@cp $(BRIDGE_DIR)/Info.plist $(BRIDGE_BUNDLE)/Contents/Info.plist
+	@$(CC) $(BRIDGE_COMMON) -std=gnu11 -c $(BRIDGE_SRC)/kmod_info.c -o $(BRIDGE_OBJ)/kmod.o
+	@cp "$(BRIDGE_PLIST)" "$(BRIDGE_BUNDLE)/Contents/Info.plist"
 	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext -L$(MKSDK)/Library/x86_64 \
 	    $(BRIDGE_OBJ)/core.o $(BRIDGE_OBJ)/plugin.o $(BRIDGE_OBJ)/bootstrap.o $(BRIDGE_OBJ)/service.o \
 	    $(BRIDGE_OBJ)/status.o $(BRIDGE_OBJ)/start.o $(BRIDGE_OBJ)/kmod.o -lkmod -o $(BRIDGE_BIN)
-	@python3 tools/bind_bridge.py --check "$(FRONT_UUID)" $(BRIDGE_BIN)
+	@python3 tools/bind_bridge.py --check "$(BRIDGE_UUID)" $(BRIDGE_BIN)
 	@/usr/bin/codesign --force --sign - --timestamp=none $(BRIDGE_BUNDLE) 2>/dev/null
 	@echo "  KEXT $(BRIDGE_BUNDLE)"
 
@@ -716,33 +721,20 @@ release: bundle
 	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1)): AirPort_RTW89.kext and the Kext Installer, commit $$(cat $(BUNDLE)/Contents/Resources/COMMIT)"
 	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
-# RTL8822CE uses the rtw88 PCI transport and firmware.
-RTW88_PORT := third_party/AirPort_RTW88
-RTW88_ABI := $(abspath third_party/MacKernelSDK/Headers/IOKit/80211)
-RTW88_STAGE := $(abspath $(BUILD_DIR)/rtw88/src)
-RTW88_SYNC := $(abspath src/compat_rtw89)
-RTW88_LOCAL := $(abspath src/rtl8822ce)
+# RTL8822CE station Wi-Fi and AirDrop use one matched pair on Tahoe.
+RTW88_OUT := $(abspath $(BUILD_DIR)/rtl8822ce)
+RTW88_SOURCE := $(RTW88_OUT)/source
+RTW88_PATCHES := src/rtl8822ce/tahoe-retries.patch src/rtl8822ce/tahoe-multicast.patch
 
-$(RTW88_STAGE)/.patched: $(RTW88_LOCAL)/awdl.patch $(RTW88_LOCAL)/station.patch $(wildcard $(RTW88_PORT)/src/kext/*)
-	@mkdir -p "$(RTW88_STAGE)/kext"
-	@for file in $(RTW88_PORT)/src/kext/*; do tr -d '\r' < "$$file" > "$(RTW88_STAGE)/kext/$${file##*/}"; done
-	@ln -sfn "$(abspath $(RTW88_PORT)/src/compat)" "$(RTW88_STAGE)/compat"
-	@cd "$(RTW88_STAGE)/kext" && patch -p1 < "$(RTW88_LOCAL)/awdl.patch"
-	@cd "$(RTW88_STAGE)/kext" && patch -p1 < "$(RTW88_LOCAL)/station.patch"
-	@touch "$@"
+.PHONY: rtl8822ce rtl8822ce-source
+rtl8822ce-source: $(RTW88_SOURCE)/.prepared
 
-.PHONY: rtl8822ce
-rtl8822ce: $(RTW88_STAGE)/.patched
-	$(MAKE) -C $(RTW88_PORT) -f Makefile -f "$(RTW88_LOCAL)/awdl.mk" airport \
-	    BUILD_DIR="$(abspath $(BUILD_DIR)/rtw88)" OUT_DIR="$(abspath $(BUILD_DIR)/out)" \
-	    MKSDK="$(abspath third_party/MacKernelSDK)" KEXT_SRC="$(RTW88_STAGE)/kext" RTW88_SYNC="$(RTW88_SYNC)" RTW88_LOCAL="$(RTW88_LOCAL)" \
-	    AIRPORT_KEXT_SKEL="$(RTW88_LOCAL)/bundle" \
-	    CC="xcrun clang -O2" \
-	    CXX="xcrun clang++ -O2 -fno-sized-deallocation -fno-use-cxa-atexit -I$(RTW88_SYNC) -include $(RTW88_ABI)/apple80211_var.h -include $(RTW88_ABI)/apple80211_ioctl.h"
+$(RTW88_SOURCE)/.prepared: src/rtl8822ce/prepare_source.sh third_party/rtl8822ce/AirPort_RTW88-Source.zip $(RTW88_PATCHES)
+	sh src/rtl8822ce/prepare_source.sh "$(RTW88_SOURCE)"
 
-.PHONY: rtl8822ce-tahoe
-rtl8822ce-tahoe:
-	sh src/rtl8822ce/build_tahoe_retries.sh "$(abspath $(BUILD_DIR))/rtl8822ce-tahoe"
+rtl8822ce: rtl8822ce-source
+	+sh src/rtl8822ce/build_driver.sh "$(RTW88_SOURCE)" "$(RTW88_OUT)"
+	+sh src/rtl8822ce/build_eventbridge.sh "$(abspath $(PROJ_ROOT))" "$(RTW88_OUT)" "$(RTW88_OUT)/AirPort_RTW88-2.0.2d2.zip" "$(MAKE)"
 
 clean:
 	rm -rf $(BUILD_DIR)
