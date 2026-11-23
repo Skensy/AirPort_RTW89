@@ -77,6 +77,23 @@ ioreg -r -c AirportRTW88 -l | grep -E '"(DriverBuild|AWDL_RX_DELIVERY_PATH|AWDL_
 To restore the release, set that same `BundlePath` back to
 `AirPort_RTW88.kext` and reboot.
 
+#### Station Wi-Fi with the 2.0.2d2 multicast build
+
+On 23 November 2026, one RTL8822CE running Tahoe 26.7.1 (25G241) and
+`2.0.2d2-awdl-multicast` produced the following results on three networks.
+The tested build is on the [multicast branch](https://github.com/Skensy/AirPort_RTW89/tree/codex/rtl8822ce-awdl-multicast).
+
+| Network | Observed result |
+| --- | --- |
+| iliadbox, 5 GHz, channel 44, WPA2 Personal | After startup, automatic association completed in 3.6 s and IPv4 arrived after 12.6 s. The gateway answered four pings and HTTPS succeeded over Wi-Fi. |
+| iPhone Personal Hotspot, 2.4 GHz, channel 6 | DHCP and an HTTPS request bound to the Wi-Fi interface succeeded. |
+| TIM, multiple access points | The link came up for about four seconds and dropped before IPv4. Attempts on both bands failed to sustain a connection. Using the hardware MAC address also reproduced the drop. |
+
+The driver executable was the same for all three tests. The access point,
+channel and boot session varied across trials, so the cause of the TIM
+disconnect remains open. These checks exercised ordinary Wi-Fi. Wireless
+Continuity Camera remains unverified on this build.
+
 The experimental 1.0.2d2 target in this repository uses an earlier frontend.
 To inspect AWDL on that build, open AirDrop on both devices and run these commands
 from Terminal:
