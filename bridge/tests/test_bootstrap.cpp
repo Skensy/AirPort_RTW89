@@ -32,6 +32,8 @@ bool OwlyRuntime::initialize(IOWorkLoop *loop) {
  if(!fakeRuntime)return false;
  assert(!retainedRuntimeLoop);loop->retain();retainedRuntimeLoop=loop;return true;
 }
+static unsigned fakeBoundClients = 0;
+unsigned OwlyRuntime::boundClientCount() { ioContext(); return fakeBoundClients; }
 void OwlyRuntime::deactivate() { ioContext();deactivateCalls++; }
 static void reset() {
  if(retainedRuntimeLoop){retainedRuntimeLoop->release();retainedRuntimeLoop=nullptr;}
@@ -58,6 +60,14 @@ int main() {
   assert(root.strings["OwlyEB1Version"]=="0.1.0");assert(root.flags["OwlyEB1ApiAccessReleased"]);
   assert(root.flags["OwlyEB1RuntimeInitSucceeded"]);assert(lastTimer&&lastTimer->armed);
   assert(!s.start(&root));assert(loopsMade==1);
+  for (unsigned count : {0U, 2U, 1U, 0U}) {
+      fakeBoundClients = count;
+      lastTimer->fire();
+      for (IORegistryEntry *target : {static_cast<IORegistryEntry *>(&s), static_cast<IORegistryEntry *>(&root)}) {
+          assert(target->numbers.at("OwlyEB1NativeClientCount") == count);
+          assert(target->flags.at("OwlyEB1NativeClientBound") == (count != 0));
+      }
+  }
   OwlyStatus::flag("OwlyEB1HooksReady",true);lastTimer->fire();assert(root.flags["OwlyEB1HooksReady"]);
   cleanup(s);assert(deactivateCalls==1&&liveTimers==0);}
  std::cout<<"PASS deferred resources, periodic journal, single start and unload refusal\n";

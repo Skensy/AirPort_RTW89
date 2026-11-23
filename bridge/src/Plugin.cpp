@@ -323,7 +323,6 @@ struct NativeOpenOps {
         session->setProperty("OwlyEB1NativeUserClient", "IO80211AsyncEventUserClient");
         session->setProperty("OwlyEB1AdapterBound", true);
         session->release(); // The registry retains it until native close/stop/free.
-        OwlyStatus::flag("OwlyEB1NativeClientBound", true);
         OwlyStatus::text("OwlyEB1ClientPhase", "native-client-opened");
     }
 };
@@ -935,6 +934,12 @@ bool OwlyRuntime::initialize(IOWorkLoop *loop)
     __atomic_store_n(&runtimeInitialization, 2, __ATOMIC_RELEASE);
     updateReady();
     return true;
+}
+
+unsigned OwlyRuntime::boundClientCount()
+{
+    if (__atomic_load_n(&runtimeInitialization, __ATOMIC_ACQUIRE) != 2) return 0;
+    return static_cast<unsigned>(clients.boundCount());
 }
 
 void OwlyRuntime::deactivate()

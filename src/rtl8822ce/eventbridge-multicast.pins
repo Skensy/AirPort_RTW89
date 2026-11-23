@@ -1,9 +1,8 @@
-# Reviewed identity for the RTL8822CE multicast trial paired with the
-# unchanged RTW88 event bridge. The packaging script reads these exact values
-# and has no environment override; edit only with a new reviewed candidate.
+# Reviewed Mach-O identities of the audited RTL8822CE pair.
 DRIVER_VERSION=2.0.2d2
 DRIVER_BUILD_FROM=2.0.2d1-awdl-retries
 DRIVER_BUILD_TO=2.0.2d2-awdl-multicast
-DRIVER_SHA256=ac1c6dff6ed6953e37b8799b9946ecb632cfd3494f31eba2b4b91cb763b53025
-DRIVER_UUID=AE9840B8-B378-319D-9FA8-32C9CDDA2801
+DRIVER_SHA256=9e15891f0fe618f6d3d9769d0a4b06f73bd4f0c42c5939ea48c121fe7b7cf16c
+DRIVER_UUID=B4EEF22A-421F-3586-AFE3-89C8D6155DE7
 FAMILY_UUID=4C07538B-62EB-3D6D-AEF9-93BCDCF45FAB
+BRIDGE_SHA256=b49bae6487d8154b43fccf342b85ed50fac70d77b519aca0af70ee83bffbf6b7

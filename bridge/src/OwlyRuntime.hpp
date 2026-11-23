@@ -7,5 +7,6 @@ namespace OwlyRuntime {
 bool initialize(IOWorkLoop *notificationLoop);
 /* Terminal: trampolines forward to originals, and callbacks cannot re-arm. */
 void deactivate();
+unsigned boundClientCount();
 }
 #endif

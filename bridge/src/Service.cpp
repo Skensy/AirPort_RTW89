@@ -30,6 +30,9 @@ OSDefineMetaClassAndStructors(OwlyAirLinkBridge, IOService)
 
 void OwlyAirLinkBridge::publish()
 {
+    const unsigned bound = OwlyRuntime::boundClientCount();
+    OwlyStatus::number("OwlyEB1NativeClientCount", bound);
+    OwlyStatus::flag("OwlyEB1NativeClientBound", bound != 0);
     OwlyStatus::flush(this);
     auto *resources = IOService::getResourceService();
     if (resources && resources != this) OwlyStatus::flush(resources);

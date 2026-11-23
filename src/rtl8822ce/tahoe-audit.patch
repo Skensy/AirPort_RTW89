@@ -1,0 +1,157 @@
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/pci.c
+@@ -1123,6 +1123,28 @@
+ 	return count;
+ }
+ 
++/* Check the DMA source before the RX decoder accesses the frame. */
++static bool rtw_pci_rx_span_valid(const u8 *data, u32 desc_len, u32 buf_len)
++{
++	const struct rtw_rx_desc *desc = (const struct rtw_rx_desc *)data;
++	u32 offset, len;
++	__le16 fc;
++
++	if (desc_len < sizeof(*desc) || desc_len > buf_len)
++		return false;
++	offset = desc_len + 8 * le32_get_bits(desc->w0, RTW_RX_DESC_W0_DRV_INFO_SIZE) +
++		 le32_get_bits(desc->w0, RTW_RX_DESC_W0_SHIFT);
++	len = le32_get_bits(desc->w0, RTW_RX_DESC_W0_PKT_LEN);
++	if (offset > buf_len || len > buf_len - offset)
++		return false;
++	if (le32_get_bits(desc->w2, RTW_RX_DESC_W2_C2H))
++		return len >= sizeof(struct rtw_c2h_cmd);
++	if (len < 10) /* smallest supported 802.11 control frame */
++		return false;
++	memcpy(&fc, data + offset, sizeof(fc));
++	return ieee80211_is_ctl(fc) || len >= 24;
++}
++
+ static u32 rtw_pci_rx_napi(struct rtw_dev *rtwdev, struct rtw_pci *rtwpci,
+ 			   u8 hw_queue, u32 limit)
+ {
+@@ -1151,6 +1173,8 @@
+ 		dma_sync_single_for_cpu(rtwdev->dev, dma, RTK_PCI_RX_BUF_SIZE,
+ 					DMA_FROM_DEVICE);
+ 		rx_desc = skb->data;
++		if (!rtw_pci_rx_span_valid(rx_desc, pkt_desc_sz, RTK_PCI_RX_BUF_SIZE))
++			goto next_rp;
+ 		rtw_rx_query_rx_desc(rtwdev, rx_desc, &pkt_stat, &rx_status);
+ 
+ 		/* offset from rx_desc to payload */
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/mac80211.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/mac80211.c
+@@ -664,14 +664,17 @@
+ 
+ 	rtw_leave_lps_deep(rtwdev);
+ 
+-	if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
++	if (cmd == DISABLE_KEY) {
++		hw_key_idx = key->hw_key_idx;
++	} else if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
+ 		hw_key_idx = rtw_sec_get_free_cam(sec);
+ 	} else {
+ 		/* multiple interfaces? */
+ 		hw_key_idx = key->keyidx;
+ 	}
+ 
+-	if (hw_key_idx > sec->total_cam_num) {
++	if (hw_key_idx >= sec->total_cam_num ||
++	    hw_key_idx >= ARRAY_SIZE(sec->cam_table)) {
+ 		ret = -ENOSPC;
+ 		goto out;
+ 	}
+@@ -687,7 +690,7 @@
+ 	case DISABLE_KEY:
+ 		rtw_hci_flush_all_queues(rtwdev, false);
+ 		rtw_mac_flush_all_queues(rtwdev, false);
+-		rtw_sec_clear_cam(rtwdev, sec, key->hw_key_idx);
++		rtw_sec_clear_cam(rtwdev, sec, hw_key_idx);
+ 		break;
+ 	}
+ 
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/fw.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/fw.c
+@@ -262,8 +262,7 @@
+ 			 &dev_iter_data);
+ }
+ 
+-static void rtw_fw_scan_result(struct rtw_dev *rtwdev, u8 *payload,
+-			       u8 length)
++static void rtw_fw_scan_result(struct rtw_dev *rtwdev, u8 *payload)
+ {
+ 	struct rtw_dm_info *dm_info = &rtwdev->dm_info;
+ 
+@@ -348,10 +347,14 @@
+ 			       struct sk_buff *skb)
+ {
+ 	struct rtw_c2h_cmd *c2h;
+-	u8 len;
+-
++	u32 len;
++
++	if (pkt_offset > skb->len || skb->len - pkt_offset < sizeof(*c2h)) {
++		dev_kfree_skb_any(skb);
++		return;
++	}
+ 	c2h = (struct rtw_c2h_cmd *)(skb->data + pkt_offset);
+-	len = skb->len - pkt_offset - 2;
++	len = skb->len - pkt_offset - sizeof(*c2h);
+ 	*((u32 *)skb->cb) = pkt_offset;
+ 
+ 	rtw_dbg(rtwdev, RTW_DBG_FW, "recv C2H, id=0x%02x, seq=0x%02x, len=%d\n",
+@@ -366,8 +369,10 @@
+ 		dev_kfree_skb_any(skb);
+ 		break;
+ 	case C2H_SCAN_RESULT:
+-		complete(&rtwdev->fw_scan_density);
+-		rtw_fw_scan_result(rtwdev, c2h->payload, len);
++		if (len) {
++			rtw_fw_scan_result(rtwdev, c2h->payload);
++			complete(&rtwdev->fw_scan_density);
++		}
+ 		dev_kfree_skb_any(skb);
+ 		break;
+ 	default:
+--- a/Feixiao/src/kext/RTW88AWDLManager.cpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.cpp
+@@ -955,11 +955,17 @@
+          * about one second with the common 16 TU / presence=4 schedule, so
+          * 1.2 s still gives a sparse peer rendezvous a fair chance without
+          * building a multi-second backlog. */
+-        const bool expired = !entry.packet || now < entry.queuedUS ||
+-                             now - entry.queuedUS > 1200000ULL;
+-        if (expired || mbuf_copydata(entry.packet, 0, 6, destination) != 0) {
++        const bool invalid = !entry.packet || now < entry.queuedUS;
++        const bool expired = !invalid && now - entry.queuedUS > 1200000ULL;
++        if (invalid || expired || mbuf_copydata(entry.packet, 0, 6, destination) != 0) {
++            if (invalid)
++                ++_dataDropInvalidEntry;
++            else if (expired)
++                ++_dataDropExpired;
++            else
++                ++_dataDropUnreadable;
+             if (entry.packet) mbuf_freem(entry.packet);
+-            ++_dataDropped; ++_dataDropExpired;
++            ++_dataDropped;
+             continue;
+         }
+ 
+@@ -1155,6 +1161,8 @@
+     _owner->setProperty("AWDL_DATA_DROP_BAD_LENGTH", (uint64_t)_dataDropBadLength, 32);
+     _owner->setProperty("AWDL_DATA_DROP_QUEUE_FULL", (uint64_t)_dataDropQueueFull, 32);
+     _owner->setProperty("AWDL_DATA_DROP_EXPIRED", (uint64_t)_dataDropExpired, 32);
++    _owner->setProperty("AWDL_DATA_DROP_INVALID_ENTRY", (uint64_t)_dataDropInvalidEntry, 32);
++    _owner->setProperty("AWDL_DATA_DROP_UNREADABLE", (uint64_t)_dataDropUnreadable, 32);
+     _owner->setProperty("AWDL_DATA_DEFER_NO_PEER", (uint64_t)_dataDeferredNoPeer, 32);
+     _owner->setProperty("AWDL_DATA_DEFER_PEER_WINDOW", (uint64_t)_dataDeferredPeerWindow, 32);
+     _owner->setProperty("AWDL_DATA_DEFER_MULTICAST_WINDOW", (uint64_t)_dataDeferredMulticastWindow, 32);
+--- a/Feixiao/src/kext/RTW88AWDLManager.hpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.hpp
+@@ -188,6 +188,7 @@
+     uint32_t _nullSlotStaRestores = 0;
+     uint32_t _peerSlotResets = 0, _peerTableDrops = 0;
+     uint32_t _dataDropNotReady = 0, _dataDropBadLength = 0, _dataDropQueueFull = 0;
++    uint32_t _dataDropInvalidEntry = 0, _dataDropUnreadable = 0;
+     uint32_t _dataDropExpired = 0, _dataDeferredNoPeer = 0, _dataDeferredPeerWindow = 0;
+     uint32_t _dataDeferredMulticastWindow = 0, _dataDeferredRadioBusy = 0;
+     uint32_t _dataMulticastPeerWindow = 0, _dataMulticastFallbackWindow = 0;

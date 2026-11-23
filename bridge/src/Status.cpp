@@ -21,6 +21,7 @@ Slot slots[] = {
     {"OwlyEB1NativeMemoryInstallResult", Number, 0, nullptr, false},
     {"OwlyEB1NativeMemoryRouteInstalled", Flag, 0, nullptr, false},
     {"OwlyEB1NativeClientRoutesInstalled", Flag, 0, nullptr, false},
+    {"OwlyEB1NativeClientCount", Number, 0, nullptr, false},
     {"OwlyEB1NativeClientBound", Flag, 0, nullptr, false},
     {"OwlyEB1RequestedStage", Number, 0, nullptr, false},
     {"OwlyEB1StartupStage", Number, 0, nullptr, false},

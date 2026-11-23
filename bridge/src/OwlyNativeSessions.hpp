@@ -46,6 +46,15 @@ public:
         return false;
     }
 
+    size_t boundCount() {
+        if (!_lock.valid()) return 0;
+        Guard guard(_lock);
+        size_t count = 0;
+        for (const auto &entry : _entries)
+            if (entry.native) ++count;
+        return count;
+    }
+
     Session *find(const void *native) {
         if (!native || !_lock.valid()) return nullptr;
         Guard guard(_lock);

@@ -26,7 +26,9 @@ driver_build=$(pin DRIVER_BUILD_TO)
 driver_sha=$(pin DRIVER_SHA256)
 driver_uuid=$(pin DRIVER_UUID)
 family_uuid=$(pin FAMILY_UUID)
-name=OwlyAirLinkBridge-rtl8822ce-$driver_version.zip
+bridge_sha=$(pin BRIDGE_SHA256)
+radio_archive=$(basename "$driver_zip")
+name=OwlyAirLinkBridge-rtl8822ce-${radio_archive#AirPort_RTW88-}
 
 [ -f "$driver_zip" ] || fail "missing paired driver ZIP: $driver_zip"
 work=$(mktemp -d /tmp/rtl8822ce-eventbridge.XXXXXX)
@@ -84,13 +86,15 @@ if len(changed) != 2 or old not in changed[0] or new not in changed[1]:
     sys.exit('eventbridge: build-label materialization changed more than one line')
 Path(path).write_text(updated)
 PY
-# The working bundle was signed with a CRLF Info.plist. Its exact bytes
-# contribute to the signature even when the parsed plist is identical.
+# The audited bridge is signed with LF plist bytes on every checkout.
 python3 - "$root/bridge/Info.plist" "$work/Info-bridge.plist" <<'PYTHON'
 from pathlib import Path
 import sys
-Path(sys.argv[2]).write_bytes(Path(sys.argv[1]).read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+Path(sys.argv[2]).write_bytes(Path(sys.argv[1]).read_bytes().replace(b'\r\n', b'\n'))
 PYTHON
+cp "$root/bridge/Makefile" "$work/Makefile"
+cp -R "$root/bridge/tests" "$work/tests"
+"$make_cmd" -C "$work" hosttest-sanitize bootstrap-hosttest entitlement-hosttest native-adapter-hosttest
 "$make_cmd" -C "$root" bridge BRIDGE_PLIST="$work/Info-bridge.plist" BRIDGE_DEPS= BRIDGE_UUID="$driver_uuid" \
     BRIDGE_SRC="$work/src" BRIDGE_OBJ="$work/obj" BRIDGE_BUNDLE="$work/$bundle"
 
@@ -109,7 +113,7 @@ if grep -Fxq "$build_label_from" "$work/strings"; then
     fail "stale build label: $build_label_from"
 fi
 
-echo "a7b75a5b8b02c293fdfcb6e432350fcfba6cdd929d2f9cdae4a5ea1b7200c3b5  $exe" | shasum -a 256 -c - || fail "bridge differs from the working EFI"
+echo "$bridge_sha  $exe" | shasum -a 256 -c - || fail "bridge differs from the reviewed executable"
 
 mkdir -p "$out"
 pending=$(mktemp "$out/.eventbridge.XXXXXX")

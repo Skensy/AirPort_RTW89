@@ -722,9 +722,11 @@ release: bundle
 	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
 # RTL8822CE station Wi-Fi and AirDrop use one matched pair on Tahoe.
-RTW88_OUT := $(abspath $(BUILD_DIR)/rtl8822ce)
+RTW88_RELEASE := 2.0.2d2-audit1
+RTW88_OUT := $(abspath $(BUILD_DIR)/rtl8822ce-$(RTW88_RELEASE))
+RTW88_ZIP := $(RTW88_OUT)/AirPort_RTW88-$(RTW88_RELEASE).zip
 RTW88_SOURCE := $(RTW88_OUT)/source
-RTW88_PATCHES := src/rtl8822ce/tahoe-retries.patch src/rtl8822ce/tahoe-multicast.patch
+RTW88_PATCHES := src/rtl8822ce/tahoe-retries.patch src/rtl8822ce/tahoe-multicast.patch src/rtl8822ce/tahoe-audit.patch
 
 .PHONY: rtl8822ce rtl8822ce-source
 rtl8822ce-source: $(RTW88_SOURCE)/.prepared
@@ -733,8 +735,8 @@ $(RTW88_SOURCE)/.prepared: src/rtl8822ce/prepare_source.sh third_party/rtl8822ce
 	sh src/rtl8822ce/prepare_source.sh "$(RTW88_SOURCE)"
 
 rtl8822ce: rtl8822ce-source
-	+sh src/rtl8822ce/build_driver.sh "$(RTW88_SOURCE)" "$(RTW88_OUT)"
-	+sh src/rtl8822ce/build_eventbridge.sh "$(abspath $(PROJ_ROOT))" "$(RTW88_OUT)" "$(RTW88_OUT)/AirPort_RTW88-2.0.2d2.zip" "$(MAKE)"
+	+sh src/rtl8822ce/build_driver.sh "$(RTW88_SOURCE)" "$(RTW88_OUT)" "$(RTW88_ZIP)"
+	+sh src/rtl8822ce/build_eventbridge.sh "$(abspath $(PROJ_ROOT))" "$(RTW88_OUT)" "$(RTW88_ZIP)" "$(MAKE)"
 
 clean:
 	rm -rf $(BUILD_DIR)

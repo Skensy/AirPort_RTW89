@@ -3,10 +3,14 @@
 set -eu
 work=$1
 out_dir=$2
+release_zip=$3
+patch_dir=$(cd "$(dirname "$0")" && pwd)
+driver_sha=$(sed -n 's/^DRIVER_SHA256=//p' "$patch_dir/eventbridge-multicast.pins")
 scratch=$(mktemp -d "$out_dir/.driver.XXXXXX")
 archive=$scratch/driver.zip
 trap 'rm -rf "$scratch"' EXIT
 trap 'exit 1' HUP INT TERM
+python3 "$patch_dir/test_driver.py" "$work/AirPort_RTW88"
 cd "$work/AirPort_RTW88/Feixiao"
 python3 tests/test_version_coherence.py
 python3 tests/test_v216_awdl_retries.py
@@ -27,9 +31,9 @@ fi
 cmp AirPort_RTW88.kext/Contents/Info.plist "$bundle/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$bundle"
 codesign --verify --strict "$bundle"
-echo "ac1c6dff6ed6953e37b8799b9946ecb632cfd3494f31eba2b4b91cb763b53025  $exe" | shasum -a 256 -c -
+echo "$driver_sha  $exe" | shasum -a 256 -c -
 ditto -c -k --norsrc --keepParent "$bundle" "$archive"
 unzip -tq "$archive"
 chmod 644 "$archive"
-mv -f "$archive" "$out_dir/AirPort_RTW88-2.0.2d2.zip"
-echo "Built $out_dir/AirPort_RTW88-2.0.2d2.zip"
+mv -f "$archive" "$release_zip"
+echo "Built $release_zip"
