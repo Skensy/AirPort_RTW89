@@ -1,0 +1,566 @@
+--- a/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
++++ b/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d6 — RTL8822CE AWDL adaptive unicast rate</string>
++	<string>AirPort_RTW88 2.0.2d7 — RTL8822CE AWDL adaptive unicast rate</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d6</string>
++	<string>2.0.2d7</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d6</string>
++	<string>2.0.2d7</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+--- a/Feixiao/src/compat/linux/skbuff.h
++++ b/Feixiao/src/compat/linux/skbuff.h
+@@ -47,6 +47,7 @@
+      */
+     u8         rtw_tx_report_sn;
+     bool       rtw_tx_report_sn_valid;
++    unsigned long rtw_tx_report_expires; /* identifies this use of the six-bit tag */
+ 
+     /*
+      * Set only by txAWDLDataFrame() for multicast AWDL DATA.  The rtw88 core
+--- a/Feixiao/src/kext/AirportRTW88.cpp
++++ b/Feixiao/src/kext/AirportRTW88.cpp
+@@ -102,7 +102,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d6-awdl-channel-rate");
++    setProperty("DriverBuild", "2.0.2d7-awdl-feedback");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1865,7 +1865,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d6)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d7)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+--- a/Feixiao/src/kext/RTW88AWDLManager.cpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.cpp
+@@ -1091,7 +1091,7 @@
+     _backend->publishTxReportDiagnostics(_owner);
+     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
+     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
+-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.2d6-awdl-channel-rate");
++    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.2d7-awdl-feedback");
+     _owner->setProperty("AWDL_PEER_PUBLICATION_MODE", "stable-direct-presence");
+     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
+     _owner->setProperty("AWDL_RADIO_BACKEND", "rtw88-pcie");
+--- a/Feixiao/src/kext/RTW88AWDLProtocol.hpp
++++ b/Feixiao/src/kext/RTW88AWDLProtocol.hpp
+@@ -67,6 +67,13 @@
+ constexpr unsigned rateTierCount = sizeof(rateLadder) / sizeof(rateLadder[0]);
+ constexpr uint16_t ratePromotionAcks = 16;
+ constexpr uint64_t rateEvidenceAgeUS = 750000;
++
++// 64 CCX tags at 16 ms per sample take over one second to wrap.
++inline bool requestRateReport(uint64_t &last, uint64_t now) {
++    if (!now || (last && (now < last || now - last < 16000))) return false;
++    last = now;
++    return true;
++}
+ 
+ inline bool freshRateReport(uint64_t sent, uint64_t now) {
+     return sent && now >= sent && now - sent <= rateEvidenceAgeUS;
+--- a/Feixiao/src/kext/RTW88IEEE80211.cpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.cpp
+@@ -31,6 +31,7 @@
+ int rtw88_awdl_rx_port(struct ieee80211_hw *hw, const uint8_t *mac, int *owned_port);
+ void rtw_tx(struct rtw_dev *rtwdev, struct ieee80211_tx_control *control,
+             struct sk_buff *skb);
++u32 rtw88_tx_report_pending(struct rtw_dev *rtwdev);
+ void rtw88_tx_report_diag_snapshot(struct rtw_dev *rtwdev,
+         uint32_t *enabled, uint32_t *enqueued, uint32_t *queue_depth,
+         uint32_t *c2h_seen, uint32_t *matched, uint32_t *unmatched, uint32_t *purged,
+@@ -2103,13 +2104,7 @@
+ { return __atomic_load_n(&_awdlTxStatusNoAck, __ATOMIC_RELAXED); }
+ uint32_t RTW88IEEE80211::awdlTxStatusPending() const
+ {
+-    /* Keep this metric scoped to AWDL rather than peeking into rtw_dev's
+-     * private tx_report queue.  A positive delta means a requested report
+-     * has not come back through txStatus(); it therefore includes both
+-     * currently in-flight reports and reports later purged by rtw88. */
+-    const uint32_t requested = awdlTxStatusRequested();
+-    const uint32_t completed = awdlTxStatusCompleted();
+-    return requested >= completed ? requested - completed : 0;
++    return _rtwdev ? rtw88_tx_report_pending(_rtwdev) : 0;
+ }
+ void RTW88IEEE80211::copyAWDLTxLastDestination(uint8_t out[6]) const
+ { if (out) memcpy(out, _awdlTxLastDestination, 6); }
+@@ -3926,18 +3921,24 @@
+         skb->rtw_tx_awdl_mbps = rate < RTW88AWDL::rateTierCount ? mbps : 6;
+         skb->rtw_tx_awdl_channel = channel;
+         skb->rtw_tx_awdl_generation = generation;
+-        if (_awdlRateLock) skb->rtw_tx_awdl_sent_us = awdlRateTimeUS();
+     }
+     if (multicast) {
+         info->flags |= IEEE80211_TX_CTL_NO_ACK;
+         __atomic_add_fetch(&_awdlTxMulticastSubmitted, 1U, __ATOMIC_RELAXED);
+     } else {
+-        /* Unlike normal PCI completion, a requested rtw88 TX report reflects
+-         * the firmware's CCX ACK result.  This is the first hard proof of
+-         * whether an Apple peer actually acknowledges our raw AWDL unicast. */
+-        info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
+         __atomic_add_fetch(&_awdlTxUnicastSubmitted, 1U, __ATOMIC_RELAXED);
+-        __atomic_add_fetch(&_awdlTxStatusRequested, 1U, __ATOMIC_RELAXED);
++        bool request = true;
++        if (_awdlRateLock) {
++            IOInterruptState irq = IOSimpleLockLockDisableInterrupt(_awdlRateLock);
++            const uint64_t now = awdlRateTimeUS();
++            request = RTW88AWDL::requestRateReport(_awdlLastReportUS, now);
++            if (request) skb->rtw_tx_awdl_sent_us = now;
++            IOSimpleLockUnlockEnableInterrupt(_awdlRateLock, irq);
++        }
++        if (request) {
++            info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
++            __atomic_add_fetch(&_awdlTxStatusRequested, 1U, __ATOMIC_RELAXED);
++        }
+     }
+     info->band = (_hw->conf.chandef.chan &&
+                   _hw->conf.chandef.chan->band == NL80211_BAND_5GHZ)
+--- a/Feixiao/src/kext/RTW88IEEE80211.hpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.hpp
+@@ -397,6 +397,7 @@
+     /* Single active adaptive flow, synchronised with the interrupt-time TX
+      * report.  Null lock keeps the previous fixed 6/24 selection. */
+     IOSimpleLock       *_awdlRateLock = nullptr;
++    uint64_t            _awdlLastReportUS = 0;
+     RTW88AWDL::ChannelRates _awdlRateFlow;
+     uint8_t             _macAddr[6]   = {};
+     uint32_t            _timeoutMs    = 0;
+--- a/Feixiao/src/kext/kmod_info.c
++++ b/Feixiao/src/kext/kmod_info.c
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d6", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d7", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+--- a/Feixiao/tests/test_v205_awdl_tx_accountability.py
++++ b/Feixiao/tests/test_v205_awdl_tx_accountability.py
+@@ -1,17 +1,19 @@
+ from pathlib import Path
++import plistlib
+ root=Path(__file__).resolve().parents[1]
+ rtw=(root/'src/kext/RTW88IEEE80211.cpp').read_text()
+ hdr=(root/'src/kext/RTW88IEEE80211.hpp').read_text()
+ mgr=(root/'src/kext/RTW88AWDLManager.cpp').read_text()
+ air=(root/'src/kext/AirportRTW88.cpp').read_text()
++version = plistlib.loads((root/'AirPort_RTW88.kext/Contents/Info.plist').read_bytes())['CFBundleVersion']
+ checks={
+- 'v20 build tag': '2.0.2-wifi-pcie' in air,
++ 'radio build tag': f'DriverBuild", "{version}-' in air,
+  'unicast requests firmware status': 'IEEE80211_TX_CTL_REQ_TX_STATUS' in rtw and '_awdlTxStatusRequested' in rtw,
+  'multicast remains no-ack': 'IEEE80211_TX_CTL_NO_ACK' in rtw and '_awdlTxMulticastSubmitted' in rtw,
+  'status callback checks requested frames': 'info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS' in rtw,
+  'status callback reads real ACK': 'IEEE80211_TX_STAT_ACK' in rtw and '_awdlTxStatusAcked' in rtw,
+  'AWDL identity filter retained': 'awdlBssid' in rtw and 'memcmp(hdr->addr2, _awdlAddress' in rtw,
+- 'pending is AWDL-scoped requested-completed delta': 'requested >= completed ? requested - completed : 0' in rtw,
++ 'pending counts live firmware slots': 'rtw88_tx_report_pending(_rtwdev)' in rtw,
+  'manager exports ACK telemetry': 'AWDL_TX_STATUS_ACKED' in mgr and 'AWDL_TX_STATUS_NOACK' in mgr,
+  'manager exports outstanding reports': 'AWDL_TX_STATUS_OUTSTANDING' in mgr,
+ }
+--- a/Feixiao/tests/test_v207_awdl_tx_report_race.py
++++ b/Feixiao/tests/test_v207_awdl_tx_report_race.py
+@@ -5,11 +5,11 @@
+ mainc=(root.parent/'rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c').read_text()
+ rtw=(root/'src/kext/RTW88IEEE80211.cpp').read_text()
+ checks={
+- 'early report cache exists': 'early_valid[64]' in mainh and 'early_status[64]' in mainh,
+- 'C2H-first caches report': 'diag_early_cached' in tx and 'early_expires[idx]' in tx,
+- 'PCI-later consumes report': 'diag_early_consumed' in tx and 'consume_early' in tx,
++ 'early report cache exists': 'slots[64]' in mainh and 'bool early_valid;' in mainh and 'u8 early_status;' in mainh,
++ 'C2H-first caches report': 'diag_early_cached' in tx and 'time_before(jiffies, slot->expires)' in tx,
++ 'PCI-later consumes report': 'diag_early_consumed' in tx and 'early_status = slot->early_status' in tx,
+  'resolved report uses normal tx status': 'rtw_tx_report_tx_status(rtwdev, skb, early_status == 0)' in tx,
+- 'cache initialized': 'memset(rtwdev->tx_report.early_valid' in mainc,
++ 'cache initialized': 'memset(rtwdev->tx_report.slots' in mainc,
+  'telemetry exported': 'RTW88_TXR_EARLY_C2H_CACHED' in rtw and 'RTW88_TXR_EARLY_C2H_CONSUMED' in rtw,
+ }
+ for name,ok in checks.items(): print(('PASS' if ok else 'FAIL')+': '+name)
+--- a/Feixiao/tests/test_v44_awdl_rate.py
++++ b/Feixiao/tests/test_v44_awdl_rate.py
+@@ -85,6 +85,10 @@
+ 
+     /* Production rate learner: no ACK evidence means base rate. */
+     const u8 peerA[]={2,0,0,0,0,0x10}, peerB[]={2,0,0,0,0,0x11};
++    uint64_t last = 0;
++    assert(requestRateReport(last,1));
++    for (uint64_t tick=2; tick<=16000; ++tick) assert(!requestRateReport(last,tick));
++    assert(requestRateReport(last,16001) && !requestRateReport(last,16000));
+     uint64_t now = 1000000;
+     assert(adaptiveRateDevice(0x10ec,0xc822) && adaptiveRateDevice(0x10ec,0xc82f));
+     assert(!adaptiveRateDevice(0x10ec,0xb822) && !adaptiveRateDevice(0x10ec,0xc821));
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/main.c
+@@ -2169,12 +2169,9 @@
+ 	atomic_set(&rtwdev->tx_report.diag_pci_sn_mismatch, 0);
+ 	rtwdev->tx_report.diag_last_pci_sn = 0;
+ 	rtwdev->tx_report.diag_last_pci_legacy_sn = 0;
+-	memset(rtwdev->tx_report.early_valid, 0,
+-	       sizeof(rtwdev->tx_report.early_valid));
+-	memset(rtwdev->tx_report.early_status, 0,
+-	       sizeof(rtwdev->tx_report.early_status));
+-	memset(rtwdev->tx_report.early_expires, 0,
+-	       sizeof(rtwdev->tx_report.early_expires));
++	memset(rtwdev->tx_report.slots, 0, sizeof(rtwdev->tx_report.slots));
++	rtwdev->tx_report.next_slot = 0;
++	atomic_set(&rtwdev->tx_report.wait_depth, 0);
+ 	rtwdev->tx_report.diag_last_req_sn = 0;
+ 	rtwdev->tx_report.diag_last_c2h_sn = 0;
+ 	rtwdev->tx_report.diag_last_c2h_status = 0;
+@@ -2204,7 +2201,6 @@
+ 	INIT_WORK(&rtwdev->ba_work, rtw_txq_ba_work);
+ 	skb_queue_head_init(&rtwdev->c2h_queue);
+ 	skb_queue_head_init(&rtwdev->coex.queue);
+-	skb_queue_head_init(&rtwdev->tx_report.queue);
+ 
+ 	spin_lock_init(&rtwdev->txq_lock);
+ 	spin_lock_init(&rtwdev->tx_report.q_lock);
+@@ -2257,7 +2253,6 @@
+ 	struct rtw_fw_state *fw = &rtwdev->fw;
+ 	struct rtw_fw_state *wow_fw = &rtwdev->wow_fw;
+ 	struct rtw_rsvd_page *rsvd_pkt, *tmp;
+-	unsigned long flags;
+ 
+ 	rtw_wait_firmware_completion(rtwdev);
+ 
+@@ -2269,9 +2264,7 @@
+ 
+ 	destroy_workqueue(rtwdev->tx_wq);
+ 	timer_delete_sync(&rtwdev->tx_report.purge_timer);
+-	spin_lock_irqsave(&rtwdev->tx_report.q_lock, flags);
+-	skb_queue_purge(&rtwdev->tx_report.queue);
+-	spin_unlock_irqrestore(&rtwdev->tx_report.q_lock, flags);
++	rtw_tx_report_expire(rtwdev, true);
+ 	skb_queue_purge(&rtwdev->coex.queue);
+ 	skb_queue_purge(&rtwdev->c2h_queue);
+ 
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/main.h
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/main.h
+@@ -738,11 +738,22 @@
+ 	DECLARE_BITMAP(cam_map, RTW_MAX_SEC_CAM_NUM);
+ };
+ 
++/* A wire tag has six bits. Retain its deadline after completion so that a
++ * duplicate report cannot be cached against the next packet in a burst. */
++struct rtw_tx_report_slot {
++	unsigned long expires;
++	struct sk_buff *waiting;
++	bool pending;
++	bool early_valid;
++	u8 early_status;
++};
++
+ struct rtw_tx_report {
+ 	/* protect the tx report queue */
+ 	spinlock_t q_lock;
+-	struct sk_buff_head queue;
+-	atomic_t sn;
++	struct rtw_tx_report_slot slots[64];
++	u8 next_slot;
++	atomic_t wait_depth;
+ 	struct timer_list purge_timer;
+ 
+ 	/* macOS port diagnostics: the normal rtw88 TX-report path is otherwise
+@@ -765,14 +776,6 @@
+ 	u8 diag_last_c2h_sn;
+ 	u8 diag_last_c2h_status;
+ 
+-	/*
+-	 * macOS can deliver the firmware C2H TX report before the PCI TX-complete
+-	 * path has moved the skb from the ring into tx_report.queue. Linux's
+-	 * interrupt/work ordering normally hides this race, but the port does not.
+-	 */
+-	bool early_valid[64];
+-	u8 early_status[64];
+-	unsigned long early_expires[64];
+ };
+ 
+ struct rtw_ra_report {
+@@ -2269,6 +2272,7 @@
+ void rtw_vif_port_config(struct rtw_dev *rtwdev, struct rtw_vif *rtwvif,
+ 			 u32 config);
+ void rtw_tx_report_purge_timer(struct timer_list *t);
++void rtw_tx_report_expire(struct rtw_dev *rtwdev, bool all);
+ void rtw_update_sta_info(struct rtw_dev *rtwdev, struct rtw_sta_info *si,
+ 			 bool reset_ra_mask);
+ void rtw_core_scan_start(struct rtw_dev *rtwdev, struct rtw_vif *rtwvif,
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+@@ -164,86 +164,103 @@
+ 	return rate;
+ }
+ 
++/* An skb belongs to the ring until PCI completion. Only slot->waiting is
++ * owned here. Reap missing CCX telemetry separately from explicit no-ACK. */
++void rtw_tx_report_expire(struct rtw_dev *rtwdev, bool all)
++{
++	struct rtw_tx_report *r = &rtwdev->tx_report;
++	struct sk_buff *expired[ARRAY_SIZE(r->slots)];
++	unsigned long flags, now;
++	unsigned int i, count = 0;
++
++	spin_lock_irqsave(&r->q_lock, flags);
++	now = jiffies;
++	for (i = 0; i < ARRAY_SIZE(r->slots); ++i) {
++		struct rtw_tx_report_slot *slot = &r->slots[i];
++		if (!slot->pending || (!all && time_before(now, slot->expires)))
++			continue;
++		if (slot->waiting) {
++			expired[count++] = slot->waiting;
++			slot->waiting = NULL;
++			atomic_dec(&r->wait_depth);
++		}
++		if (slot->early_valid)
++			atomic_inc(&r->diag_early_expired);
++		slot->early_valid = false;
++		slot->pending = false;
++		atomic_inc(&r->diag_purged);
++	}
++	spin_unlock_irqrestore(&r->q_lock, flags);
++	for (i = 0; i < count; ++i)
++		dev_kfree_skb_any(expired[i]);
++}
++
+ static void rtw_tx_report_enable(struct rtw_dev *rtwdev,
+-				 struct rtw_tx_pkt_info *pkt_info)
+-{
+-	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+-
+-	/* [11:8], reserved, fills with zero
+-	 * [7:2],  tx report sequence number
+-	 * [1:0],  firmware use, fills with zero
+-	 */
+-	pkt_info->sn = (atomic_inc_return(&tx_report->sn) << 2) & 0xfc;
+-	pkt_info->report = true;
+-	atomic_inc(&tx_report->diag_enabled);
+-	tx_report->diag_last_req_sn = pkt_info->sn;
++				 struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
++{
++	struct rtw_tx_report *r = &rtwdev->tx_report;
++	struct rtw_tx_report_slot *slot;
++	unsigned long flags, now;
++
++	/* New traffic also expires old requests if it keeps postponing the idle timer. */
++	rtw_tx_report_expire(rtwdev, false);
++	spin_lock_irqsave(&r->q_lock, flags);
++	now = jiffies;
++	slot = &r->slots[r->next_slot];
++	if (!slot->pending && !time_before(now, slot->expires)) {
++		pkt_info->sn = (u8)(r->next_slot << 2);
++		r->next_slot = (r->next_slot + 1) % ARRAY_SIZE(r->slots);
++		slot->expires = now + RTW_TX_PROBE_TIMEOUT;
++		slot->pending = true;
++		skb->rtw_tx_report_expires = slot->expires;
++		pkt_info->report = true;
++		atomic_inc(&r->diag_enabled);
++		r->diag_last_req_sn = pkt_info->sn;
++	} else {
++		/* Preserve data transmission, but never credit a synthetic PCI ACK. */
++		IEEE80211_SKB_CB(skb)->flags &= ~IEEE80211_TX_CTL_REQ_TX_STATUS;
++	}
++	spin_unlock_irqrestore(&r->q_lock, flags);
+ }
+ 
+ void rtw_tx_report_purge_timer(struct timer_list *t)
+ {
+-	struct rtw_dev *rtwdev = timer_container_of(rtwdev, t,
+-						    tx_report.purge_timer);
+-	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
++	struct rtw_dev *rtwdev = timer_container_of(rtwdev, t, tx_report.purge_timer);
++	rtw_tx_report_expire(rtwdev, false);
++}
++
++static void rtw_tx_report_tx_status(struct rtw_dev *rtwdev, struct sk_buff *skb, bool acked);
++
++void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
++{
++	struct rtw_tx_report *r = &rtwdev->tx_report;
++	struct rtw_tx_report_slot *slot = &r->slots[sn >> 2];
+ 	unsigned long flags;
+-
+-	if (skb_queue_len(&tx_report->queue) == 0)
++	u8 early_status;
++
++	atomic_inc(&r->diag_enqueued);
++	spin_lock_irqsave(&r->q_lock, flags);
++	if (!slot->pending || skb->rtw_tx_report_expires != slot->expires ||
++	    !time_before(jiffies, slot->expires)) {
++		spin_unlock_irqrestore(&r->q_lock, flags);
++		rtw_tx_report_expire(rtwdev, false);
++		dev_kfree_skb_any(skb);
+ 		return;
+-
+-	rtw_warn(rtwdev, "failed to get tx report from firmware\n");
+-
+-	/* Count reports which reached PCI completion but never produced a matching
+-	 * firmware report.  Do not call them NOACK: missing CCX telemetry is a
+-	 * different failure mode from an explicit firmware no-ACK status. */
+-	atomic_add_return((int)skb_queue_len(&tx_report->queue), &tx_report->diag_purged);
+-
+-	spin_lock_irqsave(&tx_report->q_lock, flags);
+-	skb_queue_purge(&tx_report->queue);
+-	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+-}
+-
+-static void rtw_tx_report_tx_status(struct rtw_dev *rtwdev, struct sk_buff *skb, bool acked);
+-
+-void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
+-{
+-	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+-	unsigned long flags;
+-	u8 *drv_data;
+-	u8 early_status = 0;
+-	bool consume_early = false;
+-	const u8 idx = (sn >> 2) & 0x3f;
+-
+-	/* pass sn to tx report handler through driver data */
+-	drv_data = (u8 *)IEEE80211_SKB_CB(skb)->status.status_driver_data;
+-	*drv_data = sn;
+-	atomic_inc(&tx_report->diag_enqueued);
+-
+-	/*
+-	 * On macOS the firmware C2H can beat PCI TX completion. Serialize both
+-	 * sides on q_lock so either ordering resolves exactly once.
+-	 */
+-	spin_lock_irqsave(&tx_report->q_lock, flags);
+-	if (tx_report->early_valid[idx]) {
+-		if (time_before(jiffies, tx_report->early_expires[idx])) {
+-			early_status = tx_report->early_status[idx];
+-			tx_report->early_valid[idx] = false;
+-			consume_early = true;
+-		} else {
+-			tx_report->early_valid[idx] = false;
+-			atomic_inc(&tx_report->diag_early_expired);
+-		}
+-	}
+-	if (!consume_early)
+-		__skb_queue_tail(&tx_report->queue, skb);
+-	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+-
+-	if (consume_early) {
+-		atomic_inc(&tx_report->diag_early_consumed);
+-		atomic_inc(&tx_report->diag_matched);
+-		rtw_tx_report_tx_status(rtwdev, skb, early_status == 0);
++	}
++	if (!slot->early_valid) {
++		slot->waiting = skb;
++		atomic_inc(&r->wait_depth);
++		spin_unlock_irqrestore(&r->q_lock, flags);
++		mod_timer(&r->purge_timer, jiffies + RTW_TX_PROBE_TIMEOUT);
+ 		return;
+ 	}
+-
+-	mod_timer(&tx_report->purge_timer, jiffies + RTW_TX_PROBE_TIMEOUT);
++	early_status = slot->early_status;
++	slot->early_valid = false;
++	slot->pending = false;
++	spin_unlock_irqrestore(&r->q_lock, flags);
++	atomic_inc(&r->diag_early_consumed);
++	atomic_inc(&r->diag_matched);
++	rtw_tx_report_tx_status(rtwdev, skb, early_status == 0);
+ }
+ EXPORT_SYMBOL(rtw_tx_report_enqueue);
+ 
+@@ -266,11 +283,10 @@
+ {
+ 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+ 	struct rtw_c2h_cmd *c2h;
+-	struct sk_buff *cur, *tmp;
++	struct rtw_tx_report_slot *slot;
+ 	struct sk_buff *matched_skb = NULL;
+ 	unsigned long flags;
+ 	u8 sn, st;
+-	u8 *n;
+ 
+ 	c2h = get_c2h_from_skb(skb);
+ 
+@@ -290,20 +306,17 @@
+ 	 * skb yet, cache this short-lived result for rtw_tx_report_enqueue().
+ 	 */
+ 	spin_lock_irqsave(&tx_report->q_lock, flags);
+-	skb_queue_walk_safe(&tx_report->queue, cur, tmp) {
+-		n = (u8 *)IEEE80211_SKB_CB(cur)->status.status_driver_data;
+-		if (*n == sn) {
+-			__skb_unlink(cur, &tx_report->queue);
+-			matched_skb = cur;
+-			break;
+-		}
+-	}
+-
+-	if (!matched_skb) {
+-		const u8 idx = (sn >> 2) & 0x3f;
+-		tx_report->early_status[idx] = st;
+-		tx_report->early_expires[idx] = jiffies + RTW_TX_PROBE_TIMEOUT;
+-		tx_report->early_valid[idx] = true;
++	slot = &tx_report->slots[sn >> 2];
++	if (!slot->pending || !time_before(jiffies, slot->expires) || slot->early_valid) {
++		atomic_inc(&tx_report->diag_unmatched);
++	} else if (slot->waiting) {
++		matched_skb = slot->waiting;
++		slot->waiting = NULL;
++		slot->pending = false;
++		atomic_dec(&tx_report->wait_depth);
++	} else {
++		slot->early_status = st;
++		slot->early_valid = true;
+ 		atomic_inc(&tx_report->diag_unmatched);
+ 		atomic_inc(&tx_report->diag_early_cached);
+ 	}
+@@ -313,6 +326,22 @@
+ 		atomic_inc(&tx_report->diag_matched);
+ 		rtw_tx_report_tx_status(rtwdev, matched_skb, st == 0);
+ 	}
++}
++
++u32 rtw88_tx_report_pending(struct rtw_dev *rtwdev)
++{
++	struct rtw_tx_report *r = &rtwdev->tx_report;
++	unsigned long flags, now;
++	u32 count = 0;
++	unsigned int i;
++
++	spin_lock_irqsave(&r->q_lock, flags);
++	now = jiffies;
++	for (i = 0; i < ARRAY_SIZE(r->slots); ++i)
++		if (r->slots[i].pending && time_before(now, r->slots[i].expires))
++			++count;
++	spin_unlock_irqrestore(&r->q_lock, flags);
++	return count;
+ }
+ 
+ void rtw88_tx_report_diag_snapshot(struct rtw_dev *rtwdev,
+@@ -329,7 +358,7 @@
+ 	r = &rtwdev->tx_report;
+ 	if (enabled) *enabled = (u32)atomic_read(&r->diag_enabled);
+ 	if (enqueued) *enqueued = (u32)atomic_read(&r->diag_enqueued);
+-	if (queue_depth) *queue_depth = skb_queue_len(&r->queue);
++	if (queue_depth) *queue_depth = (u32)atomic_read(&r->wait_depth);
+ 	if (c2h_seen) *c2h_seen = (u32)atomic_read(&r->diag_c2h_seen);
+ 	if (matched) *matched = (u32)atomic_read(&r->diag_matched);
+ 	if (unmatched) *unmatched = (u32)atomic_read(&r->diag_unmatched);
+@@ -562,7 +591,7 @@
+ 	      is_multicast_ether_addr(hdr->addr1);
+ 
+ 	if (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)
+-		rtw_tx_report_enable(rtwdev, pkt_info);
++		rtw_tx_report_enable(rtwdev, pkt_info, skb);
+ 
+ 	pkt_info->bmc = bmc;
+ 	rtw_tx_pkt_info_update_sec(rtwdev, pkt_info, skb);

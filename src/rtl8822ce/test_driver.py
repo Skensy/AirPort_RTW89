@@ -9,6 +9,9 @@ linux = root / 'rtw88-stable/drivers/net/wireless/realtek/rtw88'
 feixiao = root / 'Feixiao'
 tests = Path(__file__).resolve().parent
 functions = {
+    'tx.c': ['void rtw_tx_report_expire(', 'static void rtw_tx_report_enable(',
+             'void rtw_tx_report_purge_timer(', 'void rtw_tx_report_enqueue(',
+             'void rtw_tx_report_handle(', 'u32 rtw88_tx_report_pending('],
     'pci.c': ['static bool rtw_pci_rx_span_valid('],
     'sec.c': ['int rtw_sec_get_free_cam('],
     'mac80211.c': ['static int rtw_ops_set_key('],
@@ -38,4 +41,5 @@ with tempfile.TemporaryDirectory(prefix='rtw88-tests-', dir='/tmp') as temp:
     subprocess.run(['make', '-s', '-C', str(feixiao), '-f', str(makefile), 'audit-test',
                     f'AUDIT_TEMP={out}', f'AUDIT_TEST={tests / "test_driver.c"}'], check=True)
     subprocess.run([out / 'test'], check=True)
+    print('PASS CCX feedback expiry, bounded tags, rollover, PCI/C2H reordering and explicit ACK/no-ACK')
     print('PASS RX DMA range, CAM slot selection/removal, scan notification order, AWDL drop reasons and ownership')

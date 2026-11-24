@@ -1,0 +1,315 @@
+--- a/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
++++ b/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d5 — RTL8822CE AWDL adaptive unicast rate</string>
++	<string>AirPort_RTW88 2.0.2d6 — RTL8822CE AWDL adaptive unicast rate</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d5</string>
++	<string>2.0.2d6</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d5</string>
++	<string>2.0.2d6</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+--- a/Feixiao/src/kext/AirportRTW88.cpp
++++ b/Feixiao/src/kext/AirportRTW88.cpp
+@@ -102,7 +102,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d5-awdl-adaptive");
++    setProperty("DriverBuild", "2.0.2d6-awdl-channel-rate");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1865,7 +1865,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d5)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d6)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+--- a/Feixiao/src/kext/RTW88AWDLManager.cpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.cpp
+@@ -814,6 +814,10 @@
+     peer->timing = action;
+     if (action.electionValid) peer->election = action;
+     peer->lastRSSI = rssi; peer->lastChannel = channel; peer->lastSubtype = action.subtype;
++    auto &signal = peer->signals[RTW88AWDL::rateChannelSlot(channel)];
++    signal.channel = channel;
++    signal.rssi = rssi;
++    signal.observedUS = now;
+     // Retain partial advertisements for promotion; elect only valid peers.
+     if (action.subtype == 3) {
+         if (!peer->sawMIF) ++_mifPeersObserved;
+@@ -982,6 +986,7 @@
+ 
+         bool ready = false;
+         uint8_t mbps = 6;
++        bool cachedSignal = false;
+         uint32_t generation = 0;
+         uint64_t remainingUS = window.remainingUS;
+         const bool multicast = (destination[0] & 1U) != 0;
+@@ -1008,12 +1013,13 @@
+                 if (!ready) ++_dataDeferredPeerWindow;
+                 if (pw.remainingUS < remainingUS) remainingUS = pw.remainingUS;
+                 if (ready && !paced) {
+-                    // Only a fresh same-channel sample can feed the rate learner.
+-                    const bool fresh = peer.lastChannel == window.channel &&
+-                                       peer.lastRSSI < 0 && now >= peer.seenUS &&
+-                                       now - peer.seenUS <= 750000;
++                    const auto &signal = peer.signals[RTW88AWDL::rateChannelSlot(window.channel)];
++                    const bool sameChannel = peer.lastChannel == window.channel;
++                    const bool fresh = signal.fresh(window.channel, now) &&
++                                       (sameChannel || _backend->awdlAdaptiveRatesEnabled());
++                    cachedSignal = fresh && !sameChannel;
+                     mbps = _backend->awdlSelectRate(destination, window.channel,
+-                                                    peer.lastRSSI, fresh, now,
++                                                    signal.rssi, fresh, now,
+                                                     now < _fastRetryAfterUS,
+                                                     &generation);
+                 }
+@@ -1042,6 +1048,7 @@
+                 if (_backend->txAWDLDataFrame(entry.packet, mbps, window.channel,
+                                               generation)) {
+                     _dataTxBusyUntilUS = finishUS;
++                    if (cachedSignal) ++_dataTxCachedSignal;
+                     const unsigned rate = RTW88AWDL::rateIndex(mbps);
+                     if (rate < RTW88AWDL::rateTierCount) ++_dataTxRate[rate];
+                     ++_dataTx;
+@@ -1084,7 +1091,7 @@
+     _backend->publishTxReportDiagnostics(_owner);
+     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
+     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
+-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.2d5-awdl-adaptive");
++    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.2d6-awdl-channel-rate");
+     _owner->setProperty("AWDL_PEER_PUBLICATION_MODE", "stable-direct-presence");
+     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
+     _owner->setProperty("AWDL_RADIO_BACKEND", "rtw88-pcie");
+@@ -1171,6 +1178,7 @@
+         _owner->setProperty("AWDL_TX_STATUS_LAST_DST", lastDst, sizeof(lastDst));
+         _owner->setProperty("AWDL_TX_STATUS_LAST_ACKED", _backend->awdlTxLastAcked() ? kOSBooleanTrue : kOSBooleanFalse);
+     }
++    _owner->setProperty("AWDL_DATA_TX_CACHED_SIGNAL", (uint64_t)_dataTxCachedSignal, 32);
+     _owner->setProperty("AWDL_DATA_TX_PACE_LIMIT", (uint64_t)maxTxBurst, 32);
+     for (unsigned i = 0; i < RTW88AWDL::rateTierCount; ++i) {
+         char name[32];
+--- a/Feixiao/src/kext/RTW88AWDLManager.hpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.hpp
+@@ -185,6 +185,7 @@
+     static constexpr unsigned maxTxBurst = 8;
+     uint32_t _dataTxPacedDefers = 0, _dataTxBurstTicks = 0;
+     uint32_t _dataTxRate[RTW88AWDL::rateTierCount] = {};
++    uint32_t _dataTxCachedSignal = 0;
+     uint32_t _lastNoAck = 0;
+     uint64_t _dataTxBusyUntilUS = 0, _fastRetryAfterUS = 0;
+     uint64_t _awdlHoldUntilUS = 0;
+@@ -224,6 +225,7 @@
+         bool sawMIF = false, versionValid = false, valid = false, announced = false;
+         uint64_t lastPresenceUS = 0, lastPresenceAttemptUS = 0;
+         int8_t lastRSSI = 0;
++        RTW88AWDL::ChannelSignal signals[RTW88AWDL::rateChannelSlots];
+         uint16_t lastChannel = 0;
+         uint8_t lastSubtype = 0xff;
+         uint8_t version = 0, deviceClass = 0;
+--- a/Feixiao/src/kext/RTW88AWDLProtocol.hpp
++++ b/Feixiao/src/kext/RTW88AWDLProtocol.hpp
+@@ -55,8 +55,7 @@
+ }
+ /* Legacy-OFDM unicast ladder for direct AWDL flows.  A tier is only sustained
+  * by fresh firmware ACK reports from the same destination, on the same channel,
+- * at that rate.  One active flow keeps the learning state bounded; switching
+- * peer or channel restarts it. */
++ * at that rate. Each channel keeps its own recent evidence. */
+ inline bool adaptiveRateDevice(uint16_t vendor, uint16_t device) {
+     return vendor == 0x10ec && (device == 0xc822 || device == 0xc82f);
+ }
+@@ -78,6 +77,28 @@
+         if (rateLadder[i].mbps == mbps) return i;
+     return rateTierCount;
+ }
++
++// Reserve distinct slots for the three social channels. Other channels share
++// a slot, and must still match the exact channel before reusing evidence.
++constexpr unsigned rateChannelSlots = 4;
++inline unsigned rateChannelSlot(uint16_t ch) {
++    switch (ch) {
++        case 6: return 0;
++        case 44: return 1;
++        case 149: return 2;
++        default: return 3;
++    }
++}
++
++struct ChannelSignal {
++    uint16_t channel = 0;
++    int8_t rssi = 0;
++    uint64_t observedUS = 0;
++
++    bool fresh(uint16_t ch, uint64_t now) const {
++        return ch && channel == ch && rssi < 0 && freshRateReport(observedUS, now);
++    }
++};
+ 
+ struct RateFlow {
+     uint8_t dst[6] = {};
+@@ -144,6 +165,27 @@
+         return true;
+     }
+ };
++struct ChannelRates {
++    RateFlow slots[rateChannelSlots];
++
++    uint8_t select(const uint8_t *dst, uint16_t ch, int8_t rssi, bool fresh,
++                   uint64_t now, bool cooldown, uint32_t *generation) {
++        auto &flow = slots[rateChannelSlot(ch)];
++        const uint8_t rate = flow.select(dst, ch, rssi, fresh, now, cooldown);
++        if (generation) *generation = flow.generation;
++        return rate;
++    }
++
++    bool complete(const uint8_t *dst, bool ack, uint8_t rate, uint16_t ch,
++                  uint32_t gen, uint64_t now) {
++        return slots[rateChannelSlot(ch)].complete(dst, ack, rate, ch, gen, now);
++    }
++
++    void invalidate() {
++        for (auto &flow : slots) flow.invalidate();
++    }
++};
++
+ // mac80211 normally suppresses duplicate MPDUs. The direct AWDL RX path
+ // bypasses it. Remember a bounded recent history per transmitter/TID/sequence,
+ // and suppress only an explicitly marked 802.11 retry of a delivered MPDU.
+--- a/Feixiao/src/kext/RTW88IEEE80211.cpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.cpp
+@@ -2076,8 +2076,7 @@
+     }
+     IOInterruptState irq = IOSimpleLockLockDisableInterrupt(_awdlRateLock);
+     const uint8_t mbps = _awdlRateFlow.select(dst, channel, rssi, fresh, nowUS,
+-                                              cooldown);
+-    if (generation) *generation = _awdlRateFlow.generation;
++                                              cooldown, generation);
+     IOSimpleLockUnlockEnableInterrupt(_awdlRateLock, irq);
+     return mbps;
+ }
+--- a/Feixiao/src/kext/RTW88IEEE80211.hpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.hpp
+@@ -203,6 +203,7 @@
+     uint8_t   awdlSelectRate(const uint8_t *dst, uint16_t channel, int8_t rssi,
+                              bool fresh, uint64_t nowUS, bool cooldown,
+                              uint32_t *generation);
++    bool      awdlAdaptiveRatesEnabled() const { return _awdlRateLock != nullptr; }
+     void      awdlResetRateLearning();
+     void      copyAWDLTxLastDestination(uint8_t out[6]) const;
+     bool      awdlTxLastAcked() const;
+@@ -396,7 +397,7 @@
+     /* Single active adaptive flow, synchronised with the interrupt-time TX
+      * report.  Null lock keeps the previous fixed 6/24 selection. */
+     IOSimpleLock       *_awdlRateLock = nullptr;
+-    RTW88AWDL::RateFlow _awdlRateFlow;
++    RTW88AWDL::ChannelRates _awdlRateFlow;
+     uint8_t             _macAddr[6]   = {};
+     uint32_t            _timeoutMs    = 0;
+ 
+--- a/Feixiao/src/kext/kmod_info.c
++++ b/Feixiao/src/kext/kmod_info.c
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d5", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d6", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+--- a/Feixiao/tests/fixtures/awdl_runtime_v16.hpp
++++ b/Feixiao/tests/fixtures/awdl_runtime_v16.hpp
+@@ -83,12 +83,13 @@
+  unsigned rateTx[RTW88AWDL::rateTierCount] = {};
+  uint8_t lastRate=6, lastDst[6]={};
+  uint16_t lastRateChannel=0; uint32_t lastGeneration=0;
+- RTW88AWDL::RateFlow rateFlow;
++ RTW88AWDL::ChannelRates rateFlow;
++ bool awdlAdaptiveRatesEnabled()const{return true;}
+  uint8_t awdlSelectRate(const uint8_t *dst,uint16_t ch,int8_t rssi,bool fresh,
+                         uint64_t now,bool cooldown,uint32_t *gen){
+-  const uint8_t mbps=rateFlow.select(dst,ch,rssi,fresh,now,cooldown);
+-  lastRate=mbps;lastRateChannel=ch;lastGeneration=rateFlow.generation;
+-  if(gen)*gen=rateFlow.generation;
++  const uint8_t mbps=rateFlow.select(dst,ch,rssi,fresh,now,cooldown,&lastGeneration);
++  lastRate=mbps;lastRateChannel=ch;
++  if(gen)*gen=lastGeneration;
+   return mbps;
+  }
+  void awdlResetRateLearning(){rateFlow.invalidate();}
+--- a/Feixiao/tests/test_v213_awdl_integrated.py
++++ b/Feixiao/tests/test_v213_awdl_integrated.py
+@@ -86,10 +86,22 @@
+  localWindow.remainingUS=3300;
+  m.drainData(testNow,localWindow);assert(hw.data==prior); // local guard before peer guard
+  m.flushData();
+- p.lastRSSI=-80;enqueueBulk(3);const unsigned weakBase=hw.rateTx[0];
++ p.signals[rateChannelSlot(149)].rssi=-80;enqueueBulk(3);const unsigned weakBase=hw.rateTx[0];
+  drain();assert(hw.data==prior+1 && hw.fastFrames==fastAfter);
+  assert(hw.rateTx[0]==weakBase+1); // weak RSSI drops to 6 Mbps
+- m.flushData();p.lastRSSI=-40;
++ m.flushData();p.signals[rateChannelSlot(149)].rssi=-40;
++
++ // A newer action on another channel cannot hide this peer's recent 149 RSSI.
++ const unsigned cachedBefore=m._dataTxCachedSignal;
++ auto peerAction=b;
++ size_t otherSize=buildNativeAction(f,sizeof(f),one,peerAction,3);
++ Action otherParsed;assert(parseAction(f,otherSize,otherParsed));
++ stamp(f,otherParsed,window(m._clock,peerAction.sequence,testNow),testNow,9);
++ assert(m.observeAction(f,otherSize,-75,44));
++ assert(p.lastChannel==44 && p.signals[rateChannelSlot(149)].rssi==-40);
++ enqueueBulk(1);drain();assert(m._dataTxCachedSignal==cachedBefore+1);
++ m.flushData();
++
+  // Keep peer two alive; after one expires, use the live candidate immediately.
+  testNow+=2500000;c.masterMetric=90;memcpy(c.syncAddress,two,6);assert(receive(two,c,3));
+  testNow+=600000;m.tick();assert(!memcmp(m._syncPeerMac,two,6));
+--- a/Feixiao/tests/test_v44_awdl_rate.py
++++ b/Feixiao/tests/test_v44_awdl_rate.py
+@@ -148,6 +148,32 @@
+     promote(f,peerA,6,24,-40,now);
+     assert(f.select(peerA,44,-40,true,now,false)==6);
+     assert(f.select(peerA,149,-40,true,now,false)==6);
++    // Replay a social-channel hop. A delayed 44 ACK belongs to the 44 flow.
++    ChannelRates channels;
++    uint32_t first44, first149, gen;
++    assert(channels.select(peerA,44,-45,true,now,false,&first44)==6);
++    assert(channels.select(peerA,149,-45,true,now,false,&first149)==6);
++    for (unsigned i=0;i<16;++i)
++        assert(channels.complete(peerA,true,6,44,first44,now));
++    assert(channels.select(peerA,44,-45,true,now,false,&gen)==24);
++    assert(!channels.complete(peerA,true,6,44,first44,now));
++    assert(channels.select(peerA,149,-45,true,now,false,&gen)==6);
++    assert(gen==first149);
++    assert(channels.select(peerA,44,-45,true,now,false,&gen)==24);
++    assert(channels.select(peerA,44,-45,true,now+rateEvidenceAgeUS+1,false,&gen)==6);
++    // A slot reused on another channel or by another peer rejects old reports.
++    assert(channels.select(peerA,36,-45,true,now,false,&gen)==6);
++    const auto oldGen=gen;
++    assert(channels.select(peerB,40,-45,true,now,false,&gen)==6);
++    assert(!channels.complete(peerA,true,6,36,oldGen,now));
++    channels.invalidate();
++    assert(!channels.complete(peerA,true,6,149,first149,now));
++    ChannelSignal sample;
++    sample.channel=44;sample.rssi=-55;sample.observedUS=now;
++    assert(sample.fresh(44,now) && !sample.fresh(149,now));
++    assert(!sample.fresh(44,now+rateEvidenceAgeUS+1) && !sample.fresh(44,now-1));
++    sample.rssi=0;assert(!sample.fresh(44,now));
++
+     /* Stale peer sample resets without needing the age timer. */
+     promote(f,peerA,6,24,-40,now);
+     assert(f.select(peerA,149,-40,false,now,false)==6);
