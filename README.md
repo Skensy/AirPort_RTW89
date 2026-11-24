@@ -25,18 +25,24 @@ USB versions of these cards are not supported.
 
 ### RTL8822CE on macOS Tahoe
 
-Download the paired RTL8822CE kexts from the [2.0.2d4 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d4). It pairs AirPort_RTW88
-(bundle version 2.0.2d4) with OwlyAirLinkBridge (bundle version 0.1.0).
-The release suffix identifies the exact pair. Keep both kexts together.
+Build 2.0.2d5 from this checkout for adaptive AWDL transmission on the RTL8822CE.
+Install AirPort_RTW88 and its matching OwlyAirLinkBridge 0.1.0 together. The previous
+6/24 Mbit/s pair is available in the [2.0.2d4 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d4).
 
-The transmitter can send several unicast frames in a shared AWDL window. A
-recent, strong signal from the destination on the current channel enables
-24 Mbit/s OFDM. Weak links, discovery and multicast use 6 Mbit/s. A firmware
-no-ACK makes the scheduler retry at the base rate for one second. Each frame
-must fit before both peers' channel guards, with space on the shared TX ring.
-`AWDL_DATA_TX_24M` counts submitted fast frames and `AWDL_DATA_TX_BURST_TICKS`
-counts callbacks with multiple submissions. AirDrop file speed still needs
-measurement on hardware. The prior audited pair is available in the
+The unicast ladder starts at 6 Mbit/s. Each promotion needs 16 firmware ACKs
+at the current rate for the same destination and channel. Signal thresholds for
+24, 36, 48 and 54 Mbit/s are respectively −65, −60, −56 and −52 dBm. The
+peer's signal sample and the ACK evidence each expire after 750 ms. Discovery and multicast use 6 Mbit/s.
+A firmware no-ACK triggers a one-second fallback. The scheduler estimates
+airtime using the selected rate and retains the guard at both ends of the
+shared availability window.
+
+For a hardware comparison, send the same file in the same direction. Check
+completion and elapsed time alongside changes in the driver's
+`AWDL_DATA_TX_6M`, `AWDL_DATA_TX_24M`, `AWDL_DATA_TX_36M`,
+`AWDL_DATA_TX_48M` and `AWDL_DATA_TX_54M` counters. These count submitted
+data frames at each requested PHY rate. AirDrop file throughput is measured
+separately. The earlier audited pair is available in the
 [2.0.2d2-audit1 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d2-audit1).
 
 The upstream source archive is included verbatim in `third_party/rtl8822ce`
@@ -47,12 +53,12 @@ On macOS with the Xcode x86_64 toolchain, run `make rtl8822ce` or `make`.
 It prepares the source, runs the radio and bridge regression tests, builds
 both kexts, checks their pinned executable hashes and verifies the bridge
 binding. Use `make rtl8822ce-source` to inspect the patched source in
-`build/rtl8822ce-2.0.2d4/source/AirPort_RTW88`.
+`build/rtl8822ce-2.0.2d5/source/AirPort_RTW88`.
 
-| Build output under `build/rtl8822ce-2.0.2d4/` | SHA-256 of the Mach-O executable |
+| Build output under `build/rtl8822ce-2.0.2d5/` | SHA-256 of the Mach-O executable |
 | --- | --- |
-| `AirPort_RTW88-2.0.2d4.zip` | `688919b84c408aa7804e9a2399054e7c4925c2e1d4f7e369f4096206748af733` |
-| `OwlyAirLinkBridge-rtl8822ce-2.0.2d4.zip` | `1d51ea5b47ed77ba1e876544d23c3e0e7bd6c04cf636fa5a60c3c016f3540fc5` |
+| `AirPort_RTW88-2.0.2d5.zip` | `d0c474aa0eb781c866f38253723c30b9401e59419581f17d6c110ea44e034a01` |
+| `OwlyAirLinkBridge-rtl8822ce-2.0.2d5.zip` | `fb990a9c82aa4b970981065548e2ac07789e4204bec10dc2c58326ff3470a66f` |
 
 The working OpenCore configuration loads the bridge after Lilu and the driver
 after IO80211FamilyLegacy. The corresponding EFI directory names are
