@@ -20,6 +20,7 @@ patch -F 0 -p1 < "$patch_dir/tahoe-retries.patch"
 patch -F 0 -p1 < "$patch_dir/tahoe-multicast.patch"
 cd ..
 patch -F 0 -p1 < "$patch_dir/tahoe-audit.patch"
+patch -F 0 -p1 < "$patch_dir/tahoe-awdl-tx.patch"
 cd "$work"
 touch .prepared
 mv "$work" "$dest"

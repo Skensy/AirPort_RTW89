@@ -1,0 +1,344 @@
+--- a/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
++++ b/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d2 — RTL8822CE AWDL multicast queue</string>
++	<string>AirPort_RTW88 2.0.2d4 — RTL8822CE AWDL transmit pacing</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d2</string>
++	<string>2.0.2d4</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d2</string>
++	<string>2.0.2d4</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+--- a/Feixiao/src/compat/linux/skbuff.h
++++ b/Feixiao/src/compat/linux/skbuff.h
+@@ -56,6 +56,7 @@
+      * kzalloc(), so every other producer starts with the tag false.
+      */
+     bool       rtw_tx_awdl_group_data;
++    bool       rtw_tx_awdl_fast; /* validated unicast on a strong direct link */
+ };
+ 
+ /* sk_buff_head — queue */
+--- a/Feixiao/src/kext/AirportRTW88.cpp
++++ b/Feixiao/src/kext/AirportRTW88.cpp
+@@ -102,7 +102,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d2-awdl-multicast");
++    setProperty("DriverBuild", "2.0.2d4-awdl-tx");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1865,7 +1865,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d2)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d4)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+--- a/Feixiao/src/kext/RTW88AWDLManager.cpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.cpp
+@@ -723,6 +723,7 @@
+         entry.packet = nullptr; entry.queuedUS = 0;
+     }
+     _queueHead = _queueCount = 0;
++    _dataTxBusyUntilUS = _fastRetryAfterUS = 0;
+ }
+ 
+ bool RTW88AWDLManager::enqueueData(mbuf_t m)
+@@ -749,7 +750,8 @@
+     Pending &entry = _pending[(_queueHead + _queueCount) % 128];
+     entry.packet = m; entry.queuedUS = nowUS();
+     ++_queueCount; ++_dataEnqueued;
+-    arm(1);
++    // Re-arming on every enqueue can postpone the drain during a TCP burst.
++    if (_queueCount == 1) arm(1);
+     return true;
+     });
+ }
+@@ -941,7 +943,14 @@
+ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
+ {
+     const unsigned count = _queueCount;
++    if (!count) return;
+     unsigned submitted = 0;
++    bool paced = false;
++    const uint32_t noAck = _backend->awdlTxStatusNoAck();
++    if (noAck != _lastNoAck) {
++        _lastNoAck = noAck;
++        _fastRetryAfterUS = now + 1000000;
++    }
+     for (unsigned i = 0; i < count; ++i) {
+         Pending entry = _pending[_queueHead];
+         _pending[_queueHead] = {};
+@@ -970,6 +979,8 @@
+         }
+ 
+         bool ready = false;
++        bool fast = false;
++        uint64_t remainingUS = window.remainingUS;
+         const bool multicast = (destination[0] & 1U) != 0;
+         if (multicast) {
+             /* OWL schedules multicast in EAW slots 0 and 10. Keep multicast
+@@ -992,15 +1003,37 @@
+                 const auto pw = RTW88AWDL::window(peer.clock, peer.sequence, now);
+                 ready = pw.channel == window.channel && RTW88AWDL::insideGuard(pw);
+                 if (!ready) ++_dataDeferredPeerWindow;
++                if (pw.remainingUS < remainingUS) remainingUS = pw.remainingUS;
++                // Use a recent signal sample from the destination on this channel.
++                fast = peer.lastChannel == window.channel && peer.lastRSSI < 0 &&
++                       peer.lastRSSI >= -65 && now - peer.seenUS <= 750000 &&
++                       now >= _fastRetryAfterUS;
+                 break;
+             }
+             if (!matchedPeer) ++_dataDeferredNoPeer;
+         }
+ 
+-        if (ready && submitted < 1) {
++        uint64_t finishUS = 0;
++        if (ready && !paced) {
++            const uint64_t current = nowUS();
++            const uint64_t start = current > _dataTxBusyUntilUS ? current : _dataTxBusyUntilUS;
++            // Ethernet to AWDL adds 26 bytes, plus four bytes of FCS. Allow
++            // time for the preamble, contention and ACK; retain the 3 TU guard.
++            const unsigned mbps = fast ? 24 : 6;
++            const uint64_t bits = (mbuf_pkthdr_len(entry.packet) + 30) * 8;
++            finishUS = start + 320 + (bits + mbps - 1) / mbps;
++            // Limit queued airtime even when enqueue or control wakes us early.
++            // Let one long base-rate frame start on an idle ring.
++            paced = submitted >= (fast ? maxTxBurst : 1U) ||
++                    (start > current && finishUS > current + 4000) ||
++                    finishUS + 3 * 1024 > now + remainingUS;
++        }
++        if (ready && !paced) {
+             if (_backend->canTransmitAWDL()) {
+                 ++_dataTxAttempts;
+-                if (_backend->txAWDLDataFrame(entry.packet)) {
++                if (_backend->txAWDLDataFrame(entry.packet, fast)) {
++                    _dataTxBusyUntilUS = finishUS;
++                    if (fast) ++_dataTxFast;
+                     ++_dataTx;
+                     /* Keep the radio through the remainder of this EAW (less
+                      * the guard) after a successful data submission. This is
+@@ -1020,20 +1053,14 @@
+             }
+             ++_dataDeferredRadioBusy;
+         } else if (ready) {
+-            /* rtw88 PCI TX is asynchronous: txAWDLDataFrame() only places the
+-             * skb into the DMA ring and kicks the queue. At our conservative
+-             * 6 Mbps AWDL rate, a full-size frame consumes roughly a few ms of
+-             * air time including 802.11 overhead/ACK. Queuing a burst of up to
+-             * 16 frames inside a ~16 TU common window lets descriptors survive
+-             * past the channel hop back to the infrastructure AP. OWL sends a
+-             * single unicast packet per eligible scheduling callback; mirror
+-             * that pacing here and revisit the queue on the next 4 ms tick. */
++            // Keep the remaining eligible packets in FIFO order for the next tick.
+             ++_dataTxPacedDefers;
+         }
+ 
+         _pending[(_queueHead + _queueCount) % 128] = entry;
+         ++_queueCount;
+     }
++    if (submitted > 1) ++_dataTxBurstTicks;
+ }
+ 
+ void RTW88AWDLManager::publishStats()
+@@ -1134,7 +1161,9 @@
+         _owner->setProperty("AWDL_TX_STATUS_LAST_DST", lastDst, sizeof(lastDst));
+         _owner->setProperty("AWDL_TX_STATUS_LAST_ACKED", _backend->awdlTxLastAcked() ? kOSBooleanTrue : kOSBooleanFalse);
+     }
+-    _owner->setProperty("AWDL_DATA_TX_PACE_LIMIT", (uint64_t)1, 32);
++    _owner->setProperty("AWDL_DATA_TX_PACE_LIMIT", (uint64_t)maxTxBurst, 32);
++    _owner->setProperty("AWDL_DATA_TX_24M", (uint64_t)_dataTxFast, 32);
++    _owner->setProperty("AWDL_DATA_TX_BURST_TICKS", (uint64_t)_dataTxBurstTicks, 32);
+     _owner->setProperty("AWDL_DATA_TX_PACED_DEFERS", (uint64_t)_dataTxPacedDefers, 32);
+     const bool peerAvailability = validPeers != 0 && _syncPeerSequenceActive;
+     const bool activeEAW = peerAvailability || _queueCount || _peerRegistrations ||
+--- a/Feixiao/src/kext/RTW88AWDLManager.hpp
++++ b/Feixiao/src/kext/RTW88AWDLManager.hpp
+@@ -182,7 +182,10 @@
+     uint32_t _actionTx = 0, _psfTx = 0, _mifTx = 0, _actionRx = 0, _dataTx = 0, _dataDropped = 0, _syncUpdates = 0;
+     uint32_t _dataEnqueueAttempts = 0, _dataEnqueued = 0;
+     uint32_t _dataTxAttempts = 0, _dataTxHwFailed = 0;
+-    uint32_t _dataTxPacedDefers = 0;
++    static constexpr unsigned maxTxBurst = 8;
++    uint32_t _dataTxPacedDefers = 0, _dataTxFast = 0, _dataTxBurstTicks = 0;
++    uint32_t _lastNoAck = 0;
++    uint64_t _dataTxBusyUntilUS = 0, _fastRetryAfterUS = 0;
+     uint64_t _awdlHoldUntilUS = 0;
+     uint32_t _activeEAWVisits = 0, _activeEAWTxHolds = 0, _activeEAWRxHolds = 0;
+     uint32_t _nullSlotStaRestores = 0;
+--- a/Feixiao/src/kext/RTW88IEEE80211.cpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.cpp
+@@ -3793,8 +3793,8 @@
+  * The payload format is:
+  *   802.11(24) | SNAP(00:17:f2, PID 0x0800) | AWDL data(8) | L3 payload
+  * The Realtek tx core explicitly supports data frames with sta == nullptr,
+- * selecting the vif MAC-ID and conservative 6 Mbps/20 MHz defaults. */
+-bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m)
++ * selecting the vif MAC-ID and a per-packet legacy OFDM rate at 20 MHz. */
++bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m, bool fast)
+ {
+     if (!m || !_powered || !_awdlReceiveMode ||
+         (_state != RTW88_STATE_IDLE && _state != RTW88_STATE_CONNECTED) ||
+@@ -3870,6 +3870,7 @@
+     info->flags = IEEE80211_TX_CTL_FIRST_FRAGMENT;
+     const bool multicast = (eh[0] & 1U) != 0;
+     skb->rtw_tx_awdl_group_data = multicast;
++    skb->rtw_tx_awdl_fast = fast && !multicast;
+     if (multicast) {
+         info->flags |= IEEE80211_TX_CTL_NO_ACK;
+         __atomic_add_fetch(&_awdlTxMulticastSubmitted, 1U, __ATOMIC_RELAXED);
+--- a/Feixiao/src/kext/RTW88IEEE80211.hpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.hpp
+@@ -185,7 +185,7 @@
+     UInt32    outputPacket(mbuf_t m);
+     bool      txRawManagementFrame(const uint8_t *frame, uint32_t len);
+     /* Native AWDL Ethernet -> 802.11 direct data encapsulation. Consumes m. */
+-    bool      txAWDLDataFrame(mbuf_t m);
++    bool      txAWDLDataFrame(mbuf_t m, bool fast);
+     /* Realtek firmware TX-report accounting for AWDL unicast.  AirportItlwm
+      * only exposes the IO80211 control-plane scaffolding; rtw88 itself owns
+      * the actual ACK/no-ACK report path on RTL88xx, so keep this telemetry in
+--- a/Feixiao/src/kext/kmod_info.c
++++ b/Feixiao/src/kext/kmod_info.c
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d2", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d4", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+--- a/Feixiao/tests/fixtures/awdl_runtime_v16.hpp
++++ b/Feixiao/tests/fixtures/awdl_runtime_v16.hpp
+@@ -73,12 +73,13 @@
+  uint32_t awdlTxStatusCompleted()const{return 0;}
+  uint32_t awdlTxStatusPending()const{return 0;}
+  uint32_t awdlTxStatusAcked()const{return 0;}
+- uint32_t awdlTxStatusNoAck()const{return 0;}
++ uint32_t awdlTxStatusNoAck()const{return noAck;}
+  bool awdlTxLastAcked()const{return false;}
+  void copyAWDLTxLastDestination(uint8_t *p)const{memset(p,0,6);}
+  void publishTxReportDiagnostics(IOService*){}
+  bool txRawManagementFrame(const uint8_t*p,uint32_t n){assert(canTransmitAWDL());++actions;last.assign(p,p+n);testNow+=actionDelayUS;return true;}
+- bool txAWDLDataFrame(mbuf_t p){assert(canTransmitAWDL());++data;mbuf_freem(p);return true;}
++ unsigned fastFrames=0, noAck=0;
++ bool txAWDLDataFrame(mbuf_t p,bool fast){assert(canTransmitAWDL());++data;if(fast)++fastFrames;mbuf_freem(p);return true;}
+ };
+ 
+ struct apple80211_channel_sequence { uint16_t flags; uint8_t pad; } __attribute__((packed));
+--- a/Feixiao/tests/test_v213_awdl_integrated.py
++++ b/Feixiao/tests/test_v213_awdl_integrated.py
+@@ -47,6 +47,31 @@
+  c.masterMetric=300;memcpy(c.syncAddress,local,6);assert(receive(two,c,3));
+  assert(!memcmp(m._syncPeerMac,one,6)); // cycle excluded
+  assert(m.enqueueData(packet(one)));assert(m.enqueueData(packet(mc)));m.tick();m.tick();assert(hw.data==2);
++ // Bulk transfer, guard, backpressure, and fallback on an explicit firmware no-ACK.
++ auto enqueueBulk=[&](unsigned count){
++  for(unsigned i=0;i<count;++i){auto p=packet(one);p->bytes.resize(1500);assert(m.enqueueData(p));}
++ };
++ auto drain=[&](){m.drainData(testNow,window(m._clock,m._action.sequence,testNow));};
++ testNow+=4000;enqueueBulk(16);unsigned fastBefore=hw.fastFrames;
++ hw.busy=true;drain();assert(hw.fastFrames==fastBefore && m._queueCount==16);hw.busy=false;
++ drain();unsigned burst=hw.fastFrames-fastBefore;
++ assert(burst>1 && burst<=m.maxTxBurst && m._queueCount==16-burst);
++ drain();assert(hw.fastFrames==fastBefore+burst); // same time, no new airtime
++ testNow+=4000;++hw.noAck;unsigned prior=hw.data;
++ drain();assert(hw.data==prior+1 && hw.fastFrames==fastBefore+burst);
++ m.flushData();
++ auto &p=m._peers[0];assert(!memcmp(p.mac,one,6));
++ auto original=p.clock;
++ auto localWindow=window(m._clock,m._action.sequence,testNow);
++ p.clock.epochUS=testNow-(65536-3300);p.clock.epochAW=0;
++ enqueueBulk(2);prior=hw.data;drain();assert(hw.data==prior); // peer guard before local guard
++ p.clock=original;
++ testNow+=4000;localWindow=window(m._clock,m._action.sequence,testNow);
++ localWindow.remainingUS=3300;
++ m.drainData(testNow,localWindow);assert(hw.data==prior); // local guard before peer guard
++ m.flushData();
++ p.lastRSSI=-80;enqueueBulk(3);drain();assert(hw.data==prior+1 && hw.fastFrames==fastBefore+burst);
++ m.flushData();p.lastRSSI=-40;
+  // Keep peer two alive; after one expires, use the live candidate immediately.
+  testNow+=2500000;c.masterMetric=90;memcpy(c.syncAddress,two,6);assert(receive(two,c,3));
+  testNow+=600000;m.tick();assert(!memcmp(m._syncPeerMac,two,6));
+--- a/Feixiao/tests/test_v217_awdl_multicast_queue.py
++++ b/Feixiao/tests/test_v217_awdl_multicast_queue.py
+@@ -108,7 +108,7 @@
+     subprocess.run([str(path / 'test')], check=True)
+ 
+ # The tag is producer-owned and initialized for both unicast and multicast.
+-producer = ieee[ieee.index('bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m)'):]
++producer = ieee[ieee.index('bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m, bool fast)'):]
+ producer = producer[:producer.index('\n}\n') + 3]
+ assert 'skb->rtw_tx_awdl_group_data = multicast;' in producer
+ assert producer.index('rtw_tx_awdl_group_data') > producer.index('const bool multicast')
+--- a/Feixiao/tests/test_v22_awdl_manager_runtime.py
++++ b/Feixiao/tests/test_v22_awdl_manager_runtime.py
+@@ -62,7 +62,7 @@
+  bool staTxBlockedByAWDL()const{return false;}
+  void restoreSTAChannelAfterAWDL(){}
+  bool txRawManagementFrame(const uint8_t*p,uint32_t n){if(!canTransmitAWDL())return false;++actions;last.assign(p,p+n);return true;}
+- bool txAWDLDataFrame(mbuf_t p){assert(canTransmitAWDL());++data;mbuf_freem(p);return true;}
++ bool txAWDLDataFrame(mbuf_t p,bool){assert(canTransmitAWDL());++data;mbuf_freem(p);return true;}
+ };
+ '''
+ main=r'''
+--- a/Feixiao/tests/test_v44_awdl_rate.py
++++ b/Feixiao/tests/test_v44_awdl_rate.py
+@@ -21,7 +21,7 @@
+ #include <cstring>
+ using u8 = uint8_t;
+ struct sk_buff { u8 *data; unsigned len; };
+-constexpr int DESC_RATE6M=4, RTW_RATEID_G=7, RTW_CHANNEL_WIDTH_20=0;
++constexpr int DESC_RATE6M=4, DESC_RATE24M=8, RTW_RATEID_G=7, RTW_CHANNEL_WIDTH_20=0;
+ struct rtw_tx_pkt_info {
+     unsigned rate=0, rate_id=0, bw=2;
+     bool use_rate=false, dis_rate_fallback=false;
+@@ -48,7 +48,9 @@
+     frame[1]=1; assert(!rtw_tx_is_awdl(&skb)); frame[1]=0;
+     frame[27]=1; assert(!rtw_tx_is_awdl(&skb));
+     rtw_tx_pkt_info info;
+-    rtw_tx_awdl_rate(&info);
++    rtw_tx_awdl_rate(&info, true);
++    assert(info.rate==DESC_RATE24M && info.use_rate && info.dis_rate_fallback);
++    rtw_tx_awdl_rate(&info, false);
+     assert(info.rate==DESC_RATE6M && info.rate_id==RTW_RATEID_G);
+     assert(info.bw==RTW_CHANNEL_WIDTH_20 && info.use_rate && info.dis_rate_fallback);
+ }
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/tx.c
+@@ -510,9 +510,9 @@
+ 	return p[0] == 0x08 && !memcmp(p + 24, snap, sizeof(snap));
+ }
+ 
+-static void rtw_tx_awdl_rate(struct rtw_tx_pkt_info *pkt_info)
+-{
+-	pkt_info->rate = DESC_RATE6M;
++static void rtw_tx_awdl_rate(struct rtw_tx_pkt_info *pkt_info, bool fast)
++{
++	pkt_info->rate = fast ? DESC_RATE24M : DESC_RATE6M;
+ 	pkt_info->rate_id = RTW_RATEID_G;
+ 	pkt_info->bw = RTW_CHANNEL_WIDTH_20;
+ 	pkt_info->use_rate = true;
+@@ -550,7 +550,7 @@
+ 	 * a peer STA otherwise leaves use_rate clear and inherits AP firmware RA.
+ 	 * Pin only AWDL; infrastructure Wi-Fi retains its normal rate adaptation. */
+ 	if (!sta && rtw_tx_is_awdl(skb))
+-		rtw_tx_awdl_rate(pkt_info);
++		rtw_tx_awdl_rate(pkt_info, skb->rtw_tx_awdl_fast);
+ 
+ 	bmc = is_broadcast_ether_addr(hdr->addr1) ||
+ 	      is_multicast_ether_addr(hdr->addr1);

@@ -722,11 +722,11 @@ release: bundle
 	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
 # RTL8822CE station Wi-Fi and AirDrop use one matched pair on Tahoe.
-RTW88_RELEASE := 2.0.2d2-audit1
+RTW88_RELEASE := 2.0.2d4
 RTW88_OUT := $(abspath $(BUILD_DIR)/rtl8822ce-$(RTW88_RELEASE))
 RTW88_ZIP := $(RTW88_OUT)/AirPort_RTW88-$(RTW88_RELEASE).zip
 RTW88_SOURCE := $(RTW88_OUT)/source
-RTW88_PATCHES := src/rtl8822ce/tahoe-retries.patch src/rtl8822ce/tahoe-multicast.patch src/rtl8822ce/tahoe-audit.patch
+RTW88_PATCHES := src/rtl8822ce/tahoe-retries.patch src/rtl8822ce/tahoe-multicast.patch src/rtl8822ce/tahoe-audit.patch src/rtl8822ce/tahoe-awdl-tx.patch
 
 .PHONY: rtl8822ce rtl8822ce-source
 rtl8822ce-source: $(RTW88_SOURCE)/.prepared

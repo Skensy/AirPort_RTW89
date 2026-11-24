@@ -17,6 +17,8 @@ python3 tests/test_v216_awdl_retries.py
 python3 tests/test_v214_awdl_output_ownership.py
 python3 tests/test_v211_awdl_bsd_input.py
 python3 tests/test_v217_awdl_multicast_queue.py
+python3 tests/test_v44_awdl_rate.py
+python3 tests/test_v213_awdl_integrated.py
 make airport "CC=xcrun clang -ffile-prefix-map=$work=." "CXX=xcrun clang++ -ffile-prefix-map=$work=."
 bundle=build/out/AirPort_RTW88.kext
 exe="$bundle/Contents/MacOS/AirPort_RTW88"
