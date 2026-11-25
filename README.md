@@ -25,10 +25,20 @@ USB versions of these cards are not supported.
 
 ### RTL8822CE on macOS Tahoe
 
-Build 2.0.2d9 for the RTL8822CE on Tahoe. This version decodes the host's multiple-SSID scan request and supports directed scans while associated. A native Instant Hotspot connection was verified on channel 6 with the matching BroadTek build.
+Build 2.0.2d13 for the RTL8822CE on Tahoe. A directed scan for an Instant Hotspot drops stale cache records of the same SSID on other channels. The 802.11 header length includes the HT Control field. On 5 GHz an iPhone hotspot joins at 20 MHz, and a wide join that receives no unicast frame within the handshake timeout is retried at 20 MHz. The driver publishes handshake receive counters (`STA_HANDSHAKE_RX`) and PHY CRC counters in its logs.
 Install AirPort_RTW88 and its matching OwlyAirLinkBridge 0.1.0 together.
-[Download the 2.0.2d9 pair](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d9). The previous
-6/24 Mbit/s pair is available in the [2.0.2d4 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d4).
+[Download the 2.0.2d13 pair](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d13).
+
+Known limitation: with the iPhone locked and "Allow Others to Join" off, a 5 GHz
+Instant Hotspot join can stop after association. In the recorded attempts the
+iPhone sent no EAPOL frame. With the Personal Hotspot screen open on the
+unlocked iPhone, every join completed. CoreWiFi requests a per-network private
+station address through selector 483, which IO80211Family rejects on this system
+("not recognized: 483 out of 417"). The driver therefore joins with its
+hardware address.
+
+The previous [2.0.2d9 pair](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d9) remains available. The earlier
+6/24 Mbit/s pair is in the [2.0.2d4 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d4).
 
 The unicast ladder starts at 6 Mbit/s. Each promotion needs 16 firmware ACKs
 at the current rate for the same destination and channel. Signal thresholds for
@@ -77,12 +87,12 @@ On macOS with the Xcode x86_64 toolchain, run `make rtl8822ce` or `make`.
 It prepares the source, runs the radio and bridge regression tests, builds
 both kexts, checks their pinned executable hashes and verifies the bridge
 binding. Use `make rtl8822ce-source` to inspect the patched source in
-`build/rtl8822ce-2.0.2d9/source/AirPort_RTW88`.
+`build/rtl8822ce-2.0.2d13/source/AirPort_RTW88`.
 
-| Build output under `build/rtl8822ce-2.0.2d9/` | SHA-256 of the Mach-O executable |
+| Build output under `build/rtl8822ce-2.0.2d13/` | SHA-256 of the Mach-O executable |
 | --- | --- |
-| `AirPort_RTW88-2.0.2d9.zip` | `027e4628950935113887521993aa8b95cf0c2f2fc84c9c22089ac3a42a19b4fe` |
-| `OwlyAirLinkBridge-rtl8822ce-2.0.2d9.zip` | `558061a597e806f12bce0dca29d2e837218fa6a0a155b717b136c36b56ca2ebc` |
+| `AirPort_RTW88-2.0.2d13.zip` | `66a278904c6c49b31d4ed18c0dd47ba769ada37ee21cac8616faef2f1d2e2d87` |
+| `OwlyAirLinkBridge-rtl8822ce-2.0.2d13.zip` | `ad0abc677f2823dcce8d42ad92e77ddcd2e2c87bb02601319484c687c4f6f3df` |
 
 The working OpenCore configuration loads the bridge after Lilu and the driver
 after IO80211FamilyLegacy. The corresponding EFI directory names are

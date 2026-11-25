@@ -1,0 +1,385 @@
+--- a/Feixiao/AirPort_RTW88.kext/Contents/Info.plist	2026-11-25 15:08:32
++++ b/Feixiao/AirPort_RTW88.kext/Contents/Info.plist	2026-11-25 14:09:14
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d9 — RTL8822CE AWDL adaptive unicast rate</string>
++	<string>AirPort_RTW88 2.0.2d13 — RTL8822CE AWDL adaptive unicast rate</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d9</string>
++	<string>2.0.2d13</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d9</string>
++	<string>2.0.2d13</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+--- a/Feixiao/src/compat/net/mac80211.h	2026-11-25 15:08:32
++++ b/Feixiao/src/compat/net/mac80211.h	2026-11-25 14:09:14
+@@ -170,6 +170,10 @@
+     u16 len = 24;
+     if (has_a4) len += 6;
+     if (is_qos)  len += 2;
++    /* QoS data with the Order bit carries a 4-byte HT Control field (+HTC).
++     * VHT peers that see IEEE80211_VHT_CAP_HTC_VHT in our capabilities use it,
++     * e.g. an iPhone hotspot on 5 GHz sends its EAPOL M1 this way. */
++    if (is_qos && (fc & IEEE80211_FCTL_ORDER)) len += 4;
+     return len;
+ }
+ 
+--- a/Feixiao/src/kext/AirportRTW88.cpp	2026-11-25 15:08:32
++++ b/Feixiao/src/kext/AirportRTW88.cpp	2026-11-25 14:09:14
+@@ -103,7 +103,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d9-hotspot-wire");
++    setProperty("DriverBuild", "2.0.2d13-hotspot-5ghz");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1639,6 +1639,8 @@
+             setProperty("RADIO_GROUP_CIPHER", (uint64_t)currentBSS.group_cipher, 32);
+         }
+         setProperty("RADIO_RX_FRAMES", (uint64_t)_ieee80211->receivedFrameCount(), 32);
++        setProperty("STA_HANDSHAKE_RX", _ieee80211->handshakeRxSummary());
++        setProperty("STA_STALE_SSID_EVICTIONS", (uint64_t)_ieee80211->staleSSIDEvictions(), 32);
+         return kIOReturnSuccess;
+     }
+     case APPLE80211_IOC_DISASSOCIATE:
+@@ -1893,7 +1895,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d9)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d13)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+--- a/Feixiao/src/kext/RTW88IEEE80211.cpp	2026-11-25 15:08:32
++++ b/Feixiao/src/kext/RTW88IEEE80211.cpp	2026-11-25 14:09:14
+@@ -32,6 +32,7 @@
+ void rtw_tx(struct rtw_dev *rtwdev, struct ieee80211_tx_control *control,
+             struct sk_buff *skb);
+ u32 rtw88_tx_report_pending(struct rtw_dev *rtwdev);
++void rtw88_macos_rx_crc(struct rtw_dev *rtwdev, bool reset, u32 *out);
+ void rtw88_tx_report_diag_snapshot(struct rtw_dev *rtwdev,
+         uint32_t *enabled, uint32_t *enqueued, uint32_t *queue_depth,
+         uint32_t *c2h_seen, uint32_t *matched, uint32_t *unmatched, uint32_t *purged,
+@@ -1313,6 +1314,7 @@
+     /* A corrupted frame must not change association state, peer clocks, or
+      * enter either network interface even if a diagnostic RX filter admits it. */
+     if (rxs->flag & RX_FLAG_FAILED_FCS_CRC) {
++        if (_state == RTW88_STATE_HANDSHAKING) ++_hsRx.fcs;
+         kfree_skb(skb);
+         return;
+     }
+@@ -1325,6 +1327,7 @@
+     __le16 fc = hdr->frame_control;
+ 
+     _rxFrameCount++;
++    if (_state == RTW88_STATE_HANDSHAKING) noteHandshakeRx(skb, rxs);
+ 
+     if (ieee80211_is_mgmt(fc)) {
+         processRxMgmt(skb);
+@@ -1339,6 +1342,54 @@
+     }
+ }
+ 
++// Between association and the PTK, report what the radio hears from the AP:
++// a handshake that never starts is otherwise indistinguishable from one whose
++// first message was received and dropped.
++void RTW88IEEE80211::noteHandshakeRx(const struct sk_buff *skb, const struct ieee80211_rx_status *rxs)
++{
++    const struct ieee80211_hdr *hdr = (const struct ieee80211_hdr *)skb->data;
++    const uint16_t fc = le16_to_cpu(hdr->frame_control);
++    ++_hsRx.all;
++    if (memcmp(hdr->addr2, _targetBSS.bssid, 6) != 0) return;
++    const bool data = ieee80211_is_data(hdr->frame_control);
++    if (data) ++_hsRx.dataFromAP; else ++_hsRx.otherFromAP;
++    memcpy(_hsRx.lastAddr1, hdr->addr1, 6);
++    const bool unicast = memcmp(hdr->addr1, _macAddr, 6) == 0;
++    if (unicast) ++_hsRx.unicast;
++    if (data && (fc & IEEE80211_FCTL_ORDER)) ++_hsRx.htc;
++    /* The first frames after association are mostly beacons and multicast;
++     * always log frames addressed to us so the EAPOL M1 is visible. */
++    if (_hsRx.logged < 8 || (unicast && _hsRx.unicastLogged < 8)) {
++        if (_hsRx.logged < 8) ++_hsRx.logged; else ++_hsRx.unicastLogged;
++        IOLog("rtw88: handshake rx from AP fc=0x%04x a1=%02x:%02x:%02x:%02x:%02x:%02x len=%u rate=%u enc=%u bw=%u band=%u\n",
++              fc, hdr->addr1[0], hdr->addr1[1], hdr->addr1[2], hdr->addr1[3], hdr->addr1[4], hdr->addr1[5],
++              skb->len, (unsigned)rxs->rate_idx, (unsigned)rxs->encoding, (unsigned)rxs->bw, (unsigned)rxs->band);
++    }
++}
++
++void RTW88IEEE80211::reportHandshakeRx(const char *outcome)
++{
++    uint32_t c[6] = {};
++    if (_rtwdev) rtw88_macos_rx_crc(_rtwdev, false, c);
++    IOLog("rtw88: handshake %s phy ok/err cck=%u/%u ofdm=%u/%u ht=%u/%u vht=%u/%u vht-siga-fail=%u vht-mcs-fail=%u\n",
++          outcome, c[0] & 0xffff, c[0] >> 16, c[1] & 0xffff, c[1] >> 16,
++          c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16, c[4], c[5]);
++    IOLog("rtw88: handshake %s ch=%u width=%u rx all=%u fcs=%u ap-data=%u ap-other=%u "
++          "drop-ds=%u drop-addr=%u unicast=%u htc=%u eapol=%u last-a1=%02x:%02x:%02x:%02x:%02x:%02x own=%02x:%02x:%02x:%02x:%02x:%02x\n",
++          outcome, (unsigned)_targetBSS.channel, (unsigned)_connChanWidth, _hsRx.all, _hsRx.fcs,
++          _hsRx.dataFromAP, _hsRx.otherFromAP, _hsRx.dropDS, _hsRx.dropAddr,
++          _hsRx.unicast, _hsRx.htc, _hsRx.eapol,
++          _hsRx.lastAddr1[0], _hsRx.lastAddr1[1], _hsRx.lastAddr1[2],
++          _hsRx.lastAddr1[3], _hsRx.lastAddr1[4], _hsRx.lastAddr1[5],
++          _macAddr[0], _macAddr[1], _macAddr[2], _macAddr[3], _macAddr[4], _macAddr[5]);
++    snprintf(_hsRxSummary, sizeof(_hsRxSummary),
++             "%s ch=%u w=%u uni=%u eapol=%u apdata=%u ht=%u/%u vht=%u/%u siga=%u narrow=%u hs20=%u",
++             outcome, (unsigned)_targetBSS.channel, (unsigned)_connChanWidth,
++             _hsRx.unicast, _hsRx.eapol, _hsRx.dataFromAP,
++             c[2] & 0xffff, c[2] >> 16, c[3] & 0xffff, c[3] >> 16, c[4], _narrowFallbacks,
++             _hotspotNarrowJoins);
++}
++
+ void RTW88IEEE80211::processRxMgmt(struct sk_buff *skb)
+ {
+     struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+@@ -1697,6 +1748,9 @@
+                 is_multicast_ether_addr(infraHdr->addr1);
+     bool fromAP = memcmp(infraHdr->addr2, _targetBSS.bssid, 6) == 0;
+     if (!fromDS || !toUs || !fromAP) {
++        if (_state == RTW88_STATE_HANDSHAKING && fromAP) {
++            if (!fromDS) ++_hsRx.dropDS; else ++_hsRx.dropAddr;
++        }
+         kfree_skb(skb);
+         return;
+     }
+@@ -1773,6 +1827,7 @@
+         ethertype = (uint16_t)((llc[6] << 8) | llc[7]);
+ 
+         if (ethertype == ETH_P_PAE) {
++            if (_state == RTW88_STATE_HANDSHAKING) ++_hsRx.eapol;
+             IOLog("rtw88: EAPOL RX external=%d state=%d len=%u\\n",
+                   _externalSupplicant, _state,
+                   skb->len - payload_off - 8);
+@@ -2163,6 +2218,34 @@
+  * 80 MHz VHT AP gives 173 Mbps (20 MHz MCS8) instead of 866 Mbps (80 MHz MCS9).
+  * TKIP links stay 20 MHz (HT disallowed — see htAllowed()).
+  */
++bool RTW88IEEE80211::isApplePersonalHotspot()
++{
++    if (!(_targetBSS.bssid[0] & 0x02))       /* not locally administered */
++        return false;
++    const uint8_t *ies = _targetBSS.ies;
++    const uint16_t ielen = _targetBSS.ies_len;
++    char ouis[96] = "";
++    bool apple = false;
++    for (uint16_t i = 0; i + 2 <= ielen; ) {
++        const uint8_t id = ies[i], len = ies[i + 1];
++        if ((uint32_t)i + 2 + len > ielen) break;
++        const uint8_t *d = ies + i + 2;
++        if (id == 221 && len >= 4) {
++            if (d[0] == 0x00 && d[1] == 0x17 && d[2] == 0xf2) apple = true;
++            char one[16];
++            snprintf(one, sizeof(one), "%02x%02x%02x/%02x ", d[0], d[1], d[2], d[3]);
++            strlcat(ouis, one, sizeof(ouis));
++        }
++        i += 2 + len;
++    }
++    if (!_hotspotIEsLogged) {
++        IOLog("rtw88: local BSSID on ch=%u vendor IEs: %s-> %s\n", (unsigned)_targetBSS.channel,
++              ouis, apple ? "iPhone hotspot" : "not Apple");
++        _hotspotIEsLogged = true;
++    }
++    return apple;
++}
++
+ void RTW88IEEE80211::setConnectedChandef(struct ieee80211_channel *chan)
+ {
+     _hw->conf.chandef.chan         = chan;
+@@ -2183,6 +2266,24 @@
+     if (!RTW88Peer::parse(_targetBSS.ies, _targetBSS.ies_len, peerCaps) ||
+         !peerCaps.ht || !sb->ht_cap.ht_supported) return;
+     _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20;
++    /* A wide 5 GHz handshake to this SSID timed out without a single frame
++     * addressed to us (seen with an iPhone hotspot at 80 MHz): stay at 20 MHz.
++     * Our HT capabilities then advertise 20 MHz only, so the AP sends at 20. */
++    if (bnd == NL80211_BAND_5GHZ && _narrowSSIDLen &&
++        _narrowSSIDLen == _targetBSS.ssid_len &&
++        memcmp(_narrowSSID, _targetBSS.ssid, _narrowSSIDLen) == 0)
++        return;
++    /* An iPhone Personal Hotspot (random, locally administered BSSID plus
++     * Apple's vendor element) on 5 GHz: its VHT 80 MHz frames fail CRC on
++     * this chip, so the EAPOL M1 never decodes.  20 MHz joins at once. */
++    if (bnd == NL80211_BAND_5GHZ && isApplePersonalHotspot()) {
++        if (!_hotspotNarrowLogged) {
++            IOLog("rtw88: iPhone hotspot on ch=%u: joining at 20 MHz\n", (unsigned)_targetBSS.channel);
++            _hotspotNarrowLogged = true;
++        }
++        ++_hotspotNarrowJoins;
++        return;
++    }
+     bool chip40 = (sb->ht_cap.cap & RTW88Peer::le16(peerCaps.ht) & IEEE80211_HT_CAP_SUP_WIDTH_20_40) != 0;
+     bool chip80 = chip40 && peerCaps.vht && bnd == NL80211_BAND_5GHZ && sb->vht_cap.vht_supported;
+ 
+@@ -2410,11 +2511,40 @@
+     return cmdScanChannel(0, nullptr, 0, false);
+ }
+ 
++void RTW88IEEE80211::evictSSIDElsewhere(const uint8_t *ssid, uint32_t ssidLen, uint16_t channel)
++{
++    uint32_t evicted = 0;
++    IOLockLock(_bssLock);
++    for (RTW88BSS **link = &_bssList; *link; ) {
++        RTW88BSS *b = *link;
++        const bool current = _associatedVisible && memcmp(b->bssid, _targetBSS.bssid, 6) == 0;
++        if (!current && b->channel != channel && b->ssid_len == ssidLen &&
++            memcmp(b->ssid, ssid, ssidLen) == 0) {
++            *link = b->next;
++            IOFree(b, sizeof(*b));
++            if (_bssCount) _bssCount--;
++            ++evicted;
++            continue;
++        }
++        link = &b->next;
++    }
++    IOLockUnlock(_bssLock);
++    if (evicted) {
++        _staleSSIDEvictions += evicted;
++        IOLog("rtw88: directed scan ch=%u evicted %u stale record(s) of the same SSID\n",
++              (unsigned)channel, evicted);
++    }
++}
++
+ IOReturn RTW88IEEE80211::cmdScanChannel(uint16_t channel, const uint8_t *ssid,
+                                        uint32_t ssidLen, bool passive, uint32_t dwellMs)
+ {
+     if (ssidLen > sizeof(_requestedSSID) || (ssidLen && !ssid))
+         return kIOReturnBadArgument;
++    // A directed one-channel request says where this network is now. Instant
++    // Hotspot reads results at once: an older record of the same SSID on
++    // another channel (the phone's previous session) would be joined instead.
++    if (channel && ssidLen) evictSSIDElsewhere(ssid, ssidLen, channel);
+     if (_state != RTW88_STATE_IDLE && !(channel && _state == RTW88_STATE_CONNECTED)) {
+         IOLog("rtw88: physical scan busy state=%u\n", (unsigned)_state);
+         return kIOReturnBusy;
+@@ -2962,6 +3092,8 @@
+     }
+ 
+     if (_wpa2 && !_externalSupplicant) {
++        memset(&_hsRx, 0, sizeof(_hsRx));
++        if (_rtwdev) rtw88_macos_rx_crc(_rtwdev, true, nullptr);
+         _state = RTW88_STATE_HANDSHAKING;
+         IOLog("rtw88: WPA2 — waiting for EAPOL M1\n");
+         /* Derive PMK from passphrase now */
+@@ -3524,6 +3656,7 @@
+             _parent->setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid);
+         startTxAggregation();   /* keys are installed — negotiate uplink A-MPDU */
+         IOLog("rtw88: WPA2 connected! gtk_len=%u gtk_idx=%u\n", gtk_len, gtk_idx);
++        reportHandshakeRx("complete");
+     }
+ }
+ 
+@@ -4310,6 +4443,15 @@
+ 
+     case RTW88_STATE_HANDSHAKING:
+         IOLog("rtw88: 4-way handshake timeout\n");
++        reportHandshakeRx("timeout");
++        if (_targetBSS.channel > 14 && _connChanWidth > 20 && _hsRx.unicast == 0 &&
++            _targetBSS.ssid_len && _targetBSS.ssid_len < sizeof(_narrowSSID)) {
++            memcpy(_narrowSSID, _targetBSS.ssid, _targetBSS.ssid_len);
++            _narrowSSIDLen = _targetBSS.ssid_len;
++            ++_narrowFallbacks;
++            IOLog("rtw88: no frame for us at %u MHz on ch=%u; next join to this SSID uses 20 MHz\n",
++                  (unsigned)_connChanWidth, (unsigned)_targetBSS.channel);
++        }
+         doDisconnect();
+         break;
+ 
+--- a/Feixiao/src/kext/RTW88IEEE80211.hpp	2026-11-25 15:08:32
++++ b/Feixiao/src/kext/RTW88IEEE80211.hpp	2026-11-25 14:09:14
+@@ -223,6 +223,9 @@
+     bool associatedVisible() const { return _associatedVisible; }
+     IOReturn  cmdScan();
+     IOReturn  cmdScanChannel(uint16_t channel, const uint8_t *ssid, uint32_t ssidLen, bool passive, uint32_t dwellMs = 0);
++    void      evictSSIDElsewhere(const uint8_t *ssid, uint32_t ssidLen, uint16_t channel);
++    void      noteHandshakeRx(const struct sk_buff *skb, const struct ieee80211_rx_status *rxs);
++    void      reportHandshakeRx(const char *outcome);
+     IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
+                          const uint8_t *bssid = nullptr, bool externalSupplicant = false);
+     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
+@@ -247,6 +250,8 @@
+     uint8_t channelWidthMHz() const { return _connChanWidth; }
+     bool txAggregationActive() const { return _txBaActive; }
+     uint32_t receivedFrameCount() const { return _rxFrameCount; }
++    const char *handshakeRxSummary() const { return _hsRxSummary; }
++    uint32_t staleSSIDEvictions() const { return _staleSSIDEvictions; }
+     const char *scanEngine() const { return _scanEngine; }
+     uint32_t scanChannelCount() const { return _lastScanChannelCount; }
+     uint32_t scanVisited2GHz() const { return _scanVisited2GHz; }
+@@ -454,6 +459,19 @@
+     uint8_t  _replayCtr[8] = {};
+     uint8_t  _ccmpTxPn[6] = {};
+     bool     _rxCcmpIvSkipLogged = false;
++    struct {
++        uint32_t all, fcs, dataFromAP, otherFromAP, dropDS, dropAddr, eapol, logged, unicast, htc, unicastLogged;
++        uint8_t  lastAddr1[6];
++    } _hsRx = {};
++    char     _narrowSSID[33] = {};   /* 5 GHz SSID held at 20 MHz after a silent wide handshake */
++    uint8_t  _narrowSSIDLen  = 0;
++    uint32_t _narrowFallbacks = 0;
++    uint32_t _hotspotNarrowJoins = 0;
++    bool     _hotspotNarrowLogged = false;
++    bool     _hotspotIEsLogged = false;
++    bool     isApplePersonalHotspot();
++    uint32_t _staleSSIDEvictions = 0;
++    char     _hsRxSummary[160] = "none";
+     bool     _wpa2     = false;
+     uint8_t  _assocRsnIE[257] = {};
+     uint16_t _assocRsnIELen = 0;
+--- a/Feixiao/src/kext/kmod_info.c	2026-11-25 15:08:32
++++ b/Feixiao/src/kext/kmod_info.c	2026-11-25 14:09:14
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d9", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d13", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+--- a/rtw88-stable/drivers/net/wireless/realtek/rtw88/rtw8822c.c	2026-11-25 15:08:32
++++ b/rtw88-stable/drivers/net/wireless/realtek/rtw88/rtw8822c.c	2026-11-25 14:09:14
+@@ -2810,6 +2810,36 @@
+ 	rtw_write8(rtwdev, REG_ANAPARLDO_POW_MAC, ldo_pwr);
+ }
+ 
++/* macOS port: the dynamic watchdog is off, so nothing else reads or resets
++ * the PHY receive counters.  Read them (ok in the low 16 bits, CRC errors in
++ * the high 16) and optionally reset them, to see whether frames that never
++ * reach the driver were heard by the PHY but failed to decode. */
++void rtw88_macos_rx_crc(struct rtw_dev *rtwdev, bool reset, u32 *out)
++{
++	if (out)
++		memset(out, 0, 6 * sizeof(*out));
++	if (!rtwdev || !rtwdev->chip || rtwdev->chip->id != RTW_CHIP_TYPE_8822C)
++		return;
++	if (out) {
++		out[0] = rtw_read32(rtwdev, 0x2c04);	/* CCK  */
++		out[1] = rtw_read32(rtwdev, 0x2c14);	/* OFDM */
++		out[2] = rtw_read32(rtwdev, 0x2c10);	/* HT   */
++		out[3] = rtw_read32(rtwdev, 0x2c0c);	/* VHT  */
++		out[4] = rtw_read32(rtwdev, REG_OFDM_FACNT3) & 0xffff;	/* VHT-SIG-A CRC8 */
++		out[5] = rtw_read32(rtwdev, REG_OFDM_FACNT4) >> 16;	/* VHT MCS fail  */
++	}
++	if (reset) {
++		rtw_write32_mask(rtwdev, REG_CCANRX, BIT_CCK_FA_RST, 0);
++		rtw_write32_mask(rtwdev, REG_CCANRX, BIT_CCK_FA_RST, 2);
++		rtw_write32_mask(rtwdev, REG_CCANRX, BIT_OFDM_FA_RST, 0);
++		rtw_write32_mask(rtwdev, REG_CCANRX, BIT_OFDM_FA_RST, 2);
++		rtw_write32_clr(rtwdev, REG_RX_BREAK, BIT_COM_RX_GCK_EN);
++		rtw_write32_set(rtwdev, REG_CNT_CTRL, BIT_ALL_CNT_RST);
++		rtw_write32_clr(rtwdev, REG_CNT_CTRL, BIT_ALL_CNT_RST);
++		rtw_write32_set(rtwdev, REG_RX_BREAK, BIT_COM_RX_GCK_EN);
++	}
++}
++
+ static void rtw8822c_false_alarm_statistics(struct rtw_dev *rtwdev)
+ {
+ 	struct rtw_dm_info *dm_info = &rtwdev->dm_info;
