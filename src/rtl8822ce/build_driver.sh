@@ -13,6 +13,9 @@ trap 'exit 1' HUP INT TERM
 python3 "$patch_dir/test_driver.py" "$work/AirPort_RTW88"
 cd "$work/AirPort_RTW88/Feixiao"
 python3 tests/test_version_coherence.py
+python3 tests/test_hotspot_scan.py
+python3 tests/test_connected_scan.py
+python3 tests/test_connected_scan_safe_cache.py
 python3 tests/test_v205_awdl_tx_accountability.py
 python3 tests/test_v206_awdl_tx_report_pipeline.py
 python3 tests/test_v207_awdl_tx_report_race.py

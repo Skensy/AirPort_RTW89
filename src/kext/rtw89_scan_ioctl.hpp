@@ -51,7 +51,8 @@ static inline bool rtw89DecodeHostScan(unsigned type, const void *data, size_t s
         countOffset = size == 5352 ? 528 : 768;
         channelOffset = countOffset + 4; ssidOffset = 20;
         names = rtw89ScanWord(b + 8);
-        if (names > capacity) return false;
+        const size_t bssidCountOffset = 12 + capacity * 40;
+        if (names > capacity || rtw89ScanWord(b + bssidCountOffset) > 16) return false;
         bool distinctNames = false;
         for (unsigned i = 0; i < names; i++) {
             uint32_t candidateLen = rtw89ScanWord(b + 16 + i * 40);
@@ -75,6 +76,11 @@ static inline bool rtw89DecodeHostScan(unsigned type, const void *data, size_t s
     out = {};
     out.version = APPLE80211_VERSION;
     out.bss_type = rtw89ScanWord(b + 4);
+    // Both wire forms store scan kind, PHY, dwell and rest immediately
+    // before num_channels. Single-scan dwell is a 16-bit field with padding.
+    out.scan_type = rtw89ScanWord(b + countOffset - 16);
+    const uint32_t dwell = rtw89ScanWord(b + countOffset - 8);
+    out.dwell_time = type == 10 ? (uint16_t)dwell : (uint16_t)(dwell > 65535 ? 65535 : dwell);
     out.ssid_len = length;
     for (uint32_t i = 0; i < length; i++) out.ssid[i] = b[ssidOffset + i];
     out.num_channels = channels < APPLE80211_MAX_CHANNELS ? channels : APPLE80211_MAX_CHANNELS;

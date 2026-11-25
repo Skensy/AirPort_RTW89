@@ -25,9 +25,9 @@ USB versions of these cards are not supported.
 
 ### RTL8822CE on macOS Tahoe
 
-Build 2.0.2d7 from this checkout for adaptive AWDL transmission on the RTL8822CE.
+Build 2.0.2d9 for the RTL8822CE on Tahoe. This version decodes the host's multiple-SSID scan request and supports directed scans while associated. A native Instant Hotspot connection was verified on channel 6 with the matching BroadTek build.
 Install AirPort_RTW88 and its matching OwlyAirLinkBridge 0.1.0 together.
-[Download the 2.0.2d7 pair](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d7). The previous
+[Download the 2.0.2d9 pair](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d9). The previous
 6/24 Mbit/s pair is available in the [2.0.2d4 release](https://github.com/Skensy/AirPort_RTW89/releases/tag/rtl8822ce-2.0.2d4).
 
 The unicast ladder starts at 6 Mbit/s. Each promotion needs 16 firmware ACKs
@@ -77,12 +77,12 @@ On macOS with the Xcode x86_64 toolchain, run `make rtl8822ce` or `make`.
 It prepares the source, runs the radio and bridge regression tests, builds
 both kexts, checks their pinned executable hashes and verifies the bridge
 binding. Use `make rtl8822ce-source` to inspect the patched source in
-`build/rtl8822ce-2.0.2d7/source/AirPort_RTW88`.
+`build/rtl8822ce-2.0.2d9/source/AirPort_RTW88`.
 
-| Build output under `build/rtl8822ce-2.0.2d7/` | SHA-256 of the Mach-O executable |
+| Build output under `build/rtl8822ce-2.0.2d9/` | SHA-256 of the Mach-O executable |
 | --- | --- |
-| `AirPort_RTW88-2.0.2d7.zip` | `6ae7188ca636fc052a230cd8217632c02848c65e904cb88edd08821fd31bb223` |
-| `OwlyAirLinkBridge-rtl8822ce-2.0.2d7.zip` | `0aeb09173b8b87c711b05352ad5ef33c7c6c752f1ca2f01461649dd7b89efcbf` |
+| `AirPort_RTW88-2.0.2d9.zip` | `027e4628950935113887521993aa8b95cf0c2f2fc84c9c22089ac3a42a19b4fe` |
+| `OwlyAirLinkBridge-rtl8822ce-2.0.2d9.zip` | `558061a597e806f12bce0dca29d2e837218fa6a0a155b717b136c36b56ca2ebc` |
 
 The working OpenCore configuration loads the bridge after Lilu and the driver
 after IO80211FamilyLegacy. The corresponding EFI directory names are

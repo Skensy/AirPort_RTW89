@@ -32,6 +32,7 @@ int main(int argc, char **argv)
     word(wire, 12, 1); word(wire, 16, sizeof(name));
     memcpy(wire+20, name, sizeof(name));
     word(wire, 52, 1); // second SSID is an empty wildcard
+    word(wire, 512, 1); word(wire, 520, 110);
     word(wire, 528, 1); word(wire, 532, 1);
     word(wire, 536, 149); word(wire, 540, 0x92);
     apple80211_scan_data out = {};
@@ -39,6 +40,10 @@ int main(int argc, char **argv)
     assert(out.ssid_len == sizeof(name) && !memcmp(out.ssid, name, sizeof(name)));
     assert(out.num_channels == 1 && out.channels[0].channel == 149 && out.channels[0].flags == 0x92);
 
+    assert(out.scan_type == 1 && out.dwell_time == 110);
+    word(wire, 412, 17);
+    assert(!rtw89DecodeHostScan(86, wire, sizeof(wire), out));
+    word(wire, 412, 0);
     // Empty entries before/after the target and duplicate targets are equivalent.
     word(wire, 16, 0); word(wire, 56, sizeof(name)); memcpy(wire+60, name, sizeof(name));
     assert(rtw89DecodeHostScan(86, wire, sizeof(wire), out) && out.ssid_len == sizeof(name));
@@ -87,9 +92,11 @@ int main(int argc, char **argv)
     uint8_t single[5528] = {};
     word(single, 0, 1); word(single, 4, 3); word(single, 16, sizeof(name));
     memcpy(single+20, name, sizeof(name));
+    word(single, 52, 2); word(single, 60, 0xffff006e);
     word(single, 68, 1); word(single, 72, 1); word(single, 76, 6); word(single, 80, 0x8a);
     assert(rtw89DecodeHostScan(10, single, sizeof(single), out));
     assert(out.ssid_len == sizeof(name) && out.num_channels == 1 && out.channels[0].channel == 6);
+    assert(out.scan_type == 2 && out.dwell_time == 110);
     word(single, 16, 0); // channel-only directed scan
     assert(rtw89DecodeHostScan(10, single, sizeof(single), out));
     assert(out.ssid_len == 0 && out.num_channels == 1);

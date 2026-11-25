@@ -1,0 +1,230 @@
+--- a/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
++++ b/Feixiao/AirPort_RTW88.kext/Contents/Info.plist
+@@ -15,13 +15,13 @@
+ 	<key>CFBundleDisplayName</key>
+ 	<string>AirPort_RTW88 for RTL88xx</string>
+ 	<key>CFBundleGetInfoString</key>
+-	<string>AirPort_RTW88 2.0.2d8 — RTL8822CE AWDL adaptive unicast rate</string>
++	<string>AirPort_RTW88 2.0.2d9 — RTL8822CE AWDL adaptive unicast rate</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>KEXT</string>
+ 	<key>CFBundleShortVersionString</key>
+-	<string>2.0.2d8</string>
++	<string>2.0.2d9</string>
+ 	<key>CFBundleVersion</key>
+-	<string>2.0.2d8</string>
++	<string>2.0.2d9</string>
+ 	<key>CFBundleSupportedPlatforms</key>
+ 	<array>
+ 		<string>MacOSX</string>
+--- a/Feixiao/src/kext/AirportRTW88.cpp
++++ b/Feixiao/src/kext/AirportRTW88.cpp
+@@ -3,6 +3,7 @@
+  */
+ #include "AirportRTW88.hpp"
+ #include "AirportRTW88Interface.hpp"
++#include "rtw89_scan_ioctl.hpp"
+ #include "RTW88AssocWire.hpp"
+ #include "RTW88UserClient.hpp"
+ 
+@@ -102,7 +103,7 @@
+ 
+ bool AirportRTW88::start(IOService *provider)
+ {
+-    setProperty("DriverBuild", "2.0.2d8-hotspot-scan");
++    setProperty("DriverBuild", "2.0.2d9-hotspot-wire");
+     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
+     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
+     IOLog("AirportRTW88: start\n");
+@@ -1197,6 +1198,26 @@
+ 
+     const int ce = copyin(reqData, payload, len);
+     if (ce) { IOFree(payload, allocation); return ce; }
++    // The 5352-byte host packet has ten SSID slots. Its channel list is
++    // 240 bytes earlier than in the legacy SDK's sixteen-slot structure.
++    if (version_major >= 25 && !single && rtw89HostScanLayout(reqType, len)) {
++        auto *decoded = static_cast<apple80211_scan_data *>(IOMallocZero(sizeof(apple80211_scan_data)));
++        if (!decoded) { IOFree(payload, allocation); return ENOMEM; }
++        const bool valid = rtw89DecodeHostScan(reqType, payload, len, *decoded);
++        IOFree(payload, allocation);
++        SInt32 result = valid ? apple80211Request(cmd, APPLE80211_IOC_SCAN_REQ, interface, decoded)
++                              : kIOReturnBadArgument;
++        if (valid && (decoded->ssid_len || decoded->num_channels == 1)) {
++            setProperty("STA_HOST_SCAN_CHANNELS", (uint64_t)decoded->num_channels, 32);
++            setProperty("STA_HOST_SCAN_SSID_LENGTH", (uint64_t)decoded->ssid_len, 32);
++            setProperty("STA_HOST_SCAN_DWELL_MS", (uint64_t)decoded->dwell_time, 32);
++        }
++        IOFree(decoded, sizeof(apple80211_scan_data));
++        if (!valid) return EINVAL;
++        if (result == kIOReturnSuccess || (result > 0 && result < 256)) return result;
++        const int error = errnoFromReturn(result);
++        return error ? error : EIO;
++    }
+     const uint32_t count = single ? ((apple80211_scan_data *)payload)->num_channels
+                                   : ((apple80211_scan_multiple_data *)payload)->num_channels;
+     if (count > (len - channelOffset) / sizeof(apple80211_channel)) {
+@@ -1550,7 +1571,7 @@
+             if (scan->ssid_count <= 1) {
+                 const auto &ssid = scan->ssids[0];
+                 IOReturn ret = scanRequestedChannel(scan->channels, scan->num_channels, ssid.ssid_bytes,
+-                                                    scan->ssid_count ? ssid.ssid_len : 0, scan->scan_type);
++                                                    scan->ssid_count ? ssid.ssid_len : 0, scan->scan_type, scan->dwell_time);
+                 if (ret != kIOReturnUnsupported) return ret;
+             }
+             RTW88StateResult st = {};
+@@ -1872,7 +1893,7 @@
+         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
+             char label[sizeof(d->string)] = {};
+             strlcpy(label, chip, sizeof(label));
+-            strlcat(label, " (AirPort_RTW88 2.0.2d8)", sizeof(label));
++            strlcat(label, " (AirPort_RTW88 2.0.2d9)", sizeof(label));
+             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
+         } else {
+             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
+@@ -2598,13 +2619,13 @@
+ }
+ 
+ IOReturn AirportRTW88::scanRequestedChannel(const apple80211_channel *channels, uint32_t count,
+-                                            const uint8_t *ssid, uint32_t ssidLen, uint32_t type)
++                                            const uint8_t *ssid, uint32_t ssidLen, uint32_t type, uint32_t dwellMs)
+ {
+     if (ssidLen > APPLE80211_MAX_SSID_LEN) return kIOReturnBadArgument;
+     setProperty("STA_SCAN_REQUEST_TYPE", (uint64_t)type, 32);
+     setProperty("STA_SCAN_REQUEST_CHANNELS", (uint64_t)count, 32);
+     if (version_major < 25 || type == APPLE80211_SCAN_TYPE_BACKGROUND ||
+-        (type == APPLE80211_SCAN_TYPE_FAST && !ssidLen) || (!ssidLen && count != 1))
++        (type == APPLE80211_SCAN_TYPE_FAST && !ssidLen && !(count == 1 && dwellMs)) || (!ssidLen && count != 1))
+         return kIOReturnUnsupported;
+     uint32_t channel = count == 1 ? channels[0].channel : 0;
+     if (count == 1 && (!channel || channel > 196)) return kIOReturnUnsupported;
+@@ -2620,7 +2641,7 @@
+     _scanInProgress = true;
+     _scanCursor = 0;
+     IOReturn ret = _ieee80211->cmdScanChannel((uint16_t)channel, ssid, ssidLen,
+-                                              type == APPLE80211_SCAN_TYPE_PASSIVE);
++                                              type == APPLE80211_SCAN_TYPE_PASSIVE, dwellMs);
+     if (ret != kIOReturnSuccess) _scanInProgress = false;
+     setProperty("STA_REQUESTED_SCAN_CHANNEL", (uint64_t)channel, 32);
+     setProperty("STA_REQUESTED_SCAN_SSID_LENGTH", (uint64_t)ssidLen, 32);
+@@ -2639,7 +2660,7 @@
+         return kIOReturnSuccess;
+     }
+     IOReturn targeted = scanRequestedChannel(d->channels, d->num_channels, d->ssid,
+-                                             d->ssid_len, d->scan_type);
++                                             d->ssid_len, d->scan_type, d->dwell_time);
+     if (targeted != kIOReturnUnsupported) return targeted;
+     RTW88StateResult st = {};
+     if (_ieee80211->cmdGetState(&st) == kIOReturnSuccess &&
+--- a/Feixiao/src/kext/AirportRTW88.hpp
++++ b/Feixiao/src/kext/AirportRTW88.hpp
+@@ -233,7 +233,7 @@
+     IOReturn handleDISASSOCIATE();
+     IOReturn handleSCAN_REQ(void *data);
+     IOReturn scanRequestedChannel(const apple80211_channel *channels, uint32_t count,
+-                                  const uint8_t *ssid, uint32_t ssidLen, uint32_t type);
++                                  const uint8_t *ssid, uint32_t ssidLen, uint32_t type, uint32_t dwellMs);
+     IOReturn handleSCAN_RESULT(struct apple80211_scan_result **data);
+     IOReturn handleCURRENT_NETWORK(struct apple80211_scan_result *data);
+     void fillScanResultFromBSS(const RTW88BSS &b, struct apple80211_scan_result *data, bool fullIEs);
+--- a/Feixiao/src/kext/RTW88IEEE80211.cpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.cpp
+@@ -2411,7 +2411,7 @@
+ }
+ 
+ IOReturn RTW88IEEE80211::cmdScanChannel(uint16_t channel, const uint8_t *ssid,
+-                                       uint32_t ssidLen, bool passive)
++                                       uint32_t ssidLen, bool passive, uint32_t dwellMs)
+ {
+     if (ssidLen > sizeof(_requestedSSID) || (ssidLen && !ssid))
+         return kIOReturnBadArgument;
+@@ -2424,6 +2424,7 @@
+     if (channel && (_awdlOffChannel || !_manualScanTC)) return kIOReturnBusy;
+     _awdlPreparedChannel = 0;
+     _requestedScanChannel = channel;
++    _requestedDwellMs = channel ? (uint16_t)(dwellMs > 150 ? 150 : dwellMs) : 0;
+     _requestedPassive = passive;
+     _requestedSSIDLen = (uint8_t)ssidLen;
+     if (ssidLen) memcpy(_requestedSSID, ssid, ssidLen);
+@@ -2597,8 +2598,10 @@
+          * still need a beacon-listen dwell. */
+         if (connectedScan && !home)
+             IOSleep(passiveOnly ? 90 : 35);
+-        else
+-            IOSleep(passiveOnly ? 140 : 70);
++        else {
++            const unsigned defaultDwell = passiveOnly ? 140 : 70;
++            IOSleep(_requestedDwellMs > defaultDwell ? _requestedDwellMs : defaultDwell);
++        }
+         /* Software dwell completed; this is not proof of successful RF RX. */
+         if (chan->band == NL80211_BAND_5GHZ) ++_scanVisited5GHz;
+         else if (chan->band == NL80211_BAND_2GHZ) ++_scanVisited2GHz;
+--- a/Feixiao/src/kext/RTW88IEEE80211.hpp
++++ b/Feixiao/src/kext/RTW88IEEE80211.hpp
+@@ -222,7 +222,7 @@
+     RTW88State rawState() const { return _state; }
+     bool associatedVisible() const { return _associatedVisible; }
+     IOReturn  cmdScan();
+-    IOReturn  cmdScanChannel(uint16_t channel, const uint8_t *ssid, uint32_t ssidLen, bool passive);
++    IOReturn  cmdScanChannel(uint16_t channel, const uint8_t *ssid, uint32_t ssidLen, bool passive, uint32_t dwellMs = 0);
+     IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
+                          const uint8_t *bssid = nullptr, bool externalSupplicant = false);
+     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
+@@ -409,6 +409,7 @@
+     IOLock             *_bssLock      = nullptr;
+     uint32_t            _scanGeneration = 0;
+     uint16_t            _requestedScanChannel = 0;
++    uint16_t            _requestedDwellMs = 0;
+     uint8_t             _requestedSSID[32] = {};
+     uint8_t             _requestedSSIDLen = 0;
+     bool                _requestedPassive = false;
+--- a/Feixiao/src/kext/kmod_info.c
++++ b/Feixiao/src/kext/kmod_info.c
+@@ -8,7 +8,7 @@
+ extern kern_return_t _stop(kmod_info_t *, void *);
+ extern int printf(const char *format, ...);
+ #ifdef RTW88_AIRPORT_KMOD
+-KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d8", _start, _stop)
++KMOD_EXPLICIT_DECL(com.rtw88.airport, "2.0.2d9", _start, _stop)
+ #else
+ KMOD_EXPLICIT_DECL(com.rtw88.driver, "1.0.1", _start, _stop)
+ #endif
+--- a/Feixiao/tests/test_hotspot_scan.py
++++ b/Feixiao/tests/test_hotspot_scan.py
+@@ -23,7 +23,7 @@
+     int result=0;
+     unsigned rawState() const { return state; }
+     unsigned infrastructureChannel() const { return 44; }
+-    int cmdScanChannel(uint16_t ch, const uint8_t*, uint32_t n, bool p) {
++    int cmdScanChannel(uint16_t ch, const uint8_t*, uint32_t n, bool p, uint32_t) {
+         channel=ch; length=n; passive=p; return result;
+     }
+ };
+@@ -31,7 +31,7 @@
+     Radio *_ieee80211;
+     bool _scanInProgress=false; unsigned _scanCursor=7;
+     void setProperty(const char *, uint64_t, int) {}
+-    IOReturn scanRequestedChannel(const apple80211_channel*,uint32_t,const uint8_t*,uint32_t,uint32_t);
++    IOReturn scanRequestedChannel(const apple80211_channel*,uint32_t,const uint8_t*,uint32_t,uint32_t,uint32_t);
+ };
+ """
+ cases = r"""
+@@ -39,8 +39,8 @@
+     Radio radio; AirportRTW88 driver{&radio};
+     const uint8_t name[]={'t',0,'s'};
+     const apple80211_channel ch[]={{44},{149}};
+-    auto run=[&](const apple80211_channel *c,unsigned count,unsigned len,unsigned type) {
+-        return driver.scanRequestedChannel(c,count,name,len,type);
++    auto run=[&](const apple80211_channel *c,unsigned count,unsigned len,unsigned type,unsigned dwell=0) {
++        return driver.scanRequestedChannel(c,count,name,len,type,dwell);
+     };
+     assert(run(ch,1,3,1)==0 && radio.channel==44 && radio.length==3 && !radio.passive);
+     assert(run(ch+1,1,0,2)==0 && radio.channel==149 && radio.passive);
+@@ -50,6 +50,8 @@
+     assert(run(ch,2,0,1)==kIOReturnUnsupported);
+     assert(run(nullptr,0,3,1)==0 && radio.channel==44);
+     assert(run(ch,1,0,3)==kIOReturnUnsupported);
++    assert(run(ch,1,0,3,110)==0 && radio.channel==44);
++    assert(run(ch,2,0,3,110)==kIOReturnUnsupported);
+     assert(run(ch,1,3,4)==kIOReturnUnsupported);
+     assert(run(ch,1,33,1)==kIOReturnBadArgument);
+     radio.state=0;

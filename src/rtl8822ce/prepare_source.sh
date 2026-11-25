@@ -24,6 +24,9 @@ patch -F 0 -p1 < "$patch_dir/tahoe-awdl-tx.patch"
 patch -F 0 -p1 < "$patch_dir/tahoe-awdl-adaptive.patch"
 patch -F 0 -p1 < "$patch_dir/tahoe-awdl-channel-rate.patch"
 patch -F 0 -p1 < "$patch_dir/tahoe-awdl-feedback.patch"
+patch -F 0 -p1 < "$patch_dir/tahoe-hotspot-scan.patch"
+patch -F 0 -p1 < "$patch_dir/tahoe-hotspot-wire.patch"
+cp "$patch_dir/../kext/rtw89_scan_ioctl.hpp" Feixiao/src/kext/
 cd "$work"
 touch .prepared
 mv "$work" "$dest"
